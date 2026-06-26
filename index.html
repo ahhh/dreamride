@@ -1,0 +1,1833 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Dream Ride — CarRunner</title>
+<style>
+  :root { --bg: #1a1030; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    overflow: hidden;
+    font-family: "Trebuchet MS", "Segoe UI", system-ui, sans-serif;
+    color: #fff;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: none;
+  }
+  #wrap {
+    position: fixed;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background:
+      radial-gradient(120% 90% at 50% 0%, #3a2168 0%, #1a1030 70%, #100a20 100%);
+  }
+  canvas {
+    image-rendering: -webkit-optimize-contrast;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.6), 0 0 0 4px rgba(255,255,255,0.04);
+    border-radius: 10px;
+    background: #87c6ff;
+    max-width: 100%;
+    max-height: 100%;
+    display: block;
+  }
+  #hint {
+    position: fixed;
+    bottom: 8px;
+    left: 0; right: 0;
+    text-align: center;
+    font-size: 12px;
+    color: rgba(255,255,255,0.45);
+    pointer-events: none;
+    user-select: none;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="960" height="540"></canvas>
+</div>
+<div id="hint">← → = Move &nbsp;•&nbsp; Space / ↑ = Jump &nbsp;•&nbsp; X = Imagination Beam &nbsp;•&nbsp; Down = Slide / Slam &nbsp;•&nbsp; Shift = Speed up &nbsp;•&nbsp; M = Mute &nbsp;•&nbsp; P = Pause</div>
+<script>
+"use strict";
+/* =========================================================================
+   DREAM RIDE — CarRunner
+   A single-file surreal auto-runner. Canvas + vanilla JS, no dependencies.
+   ========================================================================= */
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const W = canvas.width;   // internal logical width
+const H = canvas.height;  // internal logical height
+
+// ----- World layout constants -------------------------------------------------
+const GROUND_Y = H - 96;          // y of the ground line the player runs on
+const RAIL_Y = GROUND_Y - 150;    // height of grind rails (fences/wires)
+const PLAYER_X = 220;             // player's starting horizontal screen position
+const PLAYER_X_MIN = 90;          // how far left the kid may roam
+const PLAYER_X_MAX = 720;         // how far right the kid may roam
+const PLAYER_HSPEED = 5;          // left/right free-move speed
+const GRAVITY = 0.62;
+const JUMP_V = -13.2;
+const SLIDE_DUR = 32;             // frames a slide lasts
+const SLOW_DUR = 48;              // frames of temporary slowdown after taking a hit
+
+// =============================================================================
+//  SPRITE ASSETS  (drawn from sprites/*.png; vector art is the fallback)
+// =============================================================================
+const IMG = {};
+// curated 4-frame run cycle
+const RUN_FRAMES = ["runA", "runB", "runC", "runD"];
+function loadImg(key, file) {
+  const im = new Image();
+  im.src = file;
+  IMG[key] = im;
+}
+[
+  ["idle","idle.png"], ["jumpUp","jump_start.png"], ["jumpFall","jump_fall.png"],
+  ["jumpDown","jump_down.png"], ["land","jump_land.png"], ["slide","slide.png"],
+  ["hurt1","hurt1.png"], ["hurt2","hurt2.png"], ["celebrate","hero_celebrate.png"],
+  ["bush","bush.png"], ["mailbox","mailbox.png"], ["hydrant","hydrant.png"],
+  ["person","pedestrian.png"], ["dog","dog_obstacle.png"], ["zombie","zombie.png"],
+  ["star","star.png"],
+  ...RUN_FRAMES.map(n => [n, n + ".png"]),
+].forEach(([k, f]) => loadImg(k, "sprites/" + f));
+
+// ----- intro: a press-to-start gate (intro_screen) then a movie of cut1..cut4 -----
+const MOVIE_SEQ = ["cut1", "cut2", "cut3", "cut4"];
+[
+  ["introScene", "intro_screen.png"], ["cut1", "cut1.png"], ["cut2", "cut2.png"],
+  ["cut3", "cut3.png"], ["cut4", "cut4.png"],
+].forEach(([k, f]) => loadImg(k, "Intro_cut_scene/" + f));
+function imgReady(key) { const im = IMG[key]; return im && im.complete && im.naturalWidth > 0; }
+// draw a sprite with its bottom-center anchored at (x,y), scaled to height h
+function blit(key, x, y, h, opt) {
+  if (!imgReady(key)) return false;
+  opt = opt || {};
+  const im = IMG[key];
+  const w = im.naturalWidth / im.naturalHeight * h;
+  ctx.save();
+  ctx.translate(x, y);
+  if (opt.alpha !== undefined) ctx.globalAlpha = opt.alpha;
+  if (opt.scaleX || opt.scaleY) ctx.scale(opt.scaleX || 1, opt.scaleY || 1);
+  ctx.drawImage(im, -w/2 + (opt.dx || 0), -h + (opt.dy || 0), w, h);
+  ctx.restore();
+  return true;
+}
+
+// =============================================================================
+//  GAME STATE
+// =============================================================================
+const game = {
+  state: "intro",      // intro(gate) | movie | title | tutorial | playing | paused | destination | upgrade | gameOver | ending
+  cutIndex: 0,         // current movie image
+  cutT: 0,             // frames into the current movie segment
+  introSeen: false,    // play the intro movie the first time only
+  slowT: 0,            // temporary "stumble" slowdown after taking a hit
+  levelIndex: 0,
+  progress: 0,         // 0..100 toward destination
+  score: 0,
+  combo: 0,            // current daydream chain count
+  comboTimer: 0,       // frames until combo decays
+  bestCombo: 0,
+  speed: 5.2,
+  baseSpeed: 5.2,
+  distance: 0,         // for parallax & spawning
+  spawnCooldown: 0,
+  time: 0,
+  shake: 0,
+  flash: 0,
+  muted: false,
+  endBuilding: null,   // the destination building object once it has spawned
+  highScore: load("dreamride_high", 0),
+};
+
+// Abilities the player has unlocked (persist across levels in a run)
+const upgrades = {
+  laser: false,
+  doubleJump: false,
+  grind: false,        // grind balance — longer rail rides (rails always grindable, this extends them)
+  magnet: false,
+  chargeLaser: false,
+  dreamDash: false,
+  shield: false,       // sticker shield — ignore one hit
+  bigBounce: false,
+};
+
+const player = {
+  x: PLAYER_X,
+  y: GROUND_Y,
+  w: 34,
+  h: 52,
+  vy: 0,
+  grounded: true,
+  jumpsUsed: 0,
+  sliding: false,
+  slideT: 0,
+  onRail: null,        // reference to rail object when grinding
+  focus: 3,            // health (imagination hearts)
+  maxFocus: 3,
+  invuln: 0,           // i-frames after a hit
+  lasering: 0,         // frames laser beam is active
+  laserCharge: 0,      // for charge laser
+  sprinting: false,    // Shift held — fast run that clears gaps
+  fastFalling: false,  // Down held in air — slam down
+  hurtT: 0,            // frames showing the hurt sprite
+  landT: 0,            // frames showing the landing sprite
+  runCycle: 0,         // animation phase
+  hasShield: false,    // current shield charge
+  facing: 1,
+};
+
+// =============================================================================
+//  LEVELS
+// =============================================================================
+const LEVELS = [
+  {
+    name: "School",
+    dest: "Drive to School",
+    parentLine: "Buckle up, we're gonna be late!",
+    childLine: "I'm gonna run the WHOLE way there!",
+    sky: ["#bfe9ff", "#87c6ff"],
+    ground: "#7ec850",
+    groundDark: "#5fa83b",
+    far: "#9ad0ff",
+    house: ["#ffd9a0", "#ffb3b3", "#cdeac0", "#b8e0ff"],
+    spawn: { ring: 5, mailbox: 4, bush: 3, hydrant: 2, person: 2, animal: 2, cone: 2, sign_low: 2, fence: 3, gap: 2, spark: 6 },
+    reward: "laser",
+    rewardName: "Imagination Beam",
+    rewardDesc: "Press X to zap bushes & cardboard monsters out of your way.",
+    rewardPoints: "Zap a bush or cardboard monster for +50 each — and every zap keeps your Daydream Chain alive.",
+    destShort: "School",
+    building: "🏫",
+    length: 100,
+    speed: 5.2,
+  },
+  {
+    name: "Grocery",
+    dest: "Drive to the Grocery Store",
+    parentLine: "We're here. Don't forget the list!",
+    childLine: "Double-jump unlocked — to the sky!",
+    sky: ["#ffe6c0", "#ffc98a"],
+    ground: "#8bd07a",
+    groundDark: "#6bb05a",
+    far: "#ffd9a8",
+    house: ["#ff9aa2", "#ffd6a5", "#a0e7e5", "#bdb2ff"],
+    spawn: { ring: 5, bush: 5, mailbox: 3, person: 3, animal: 2, cone: 3, sign_low: 2, fence: 3, hydrant: 2, gap: 3, spark: 6 },
+    reward: "doubleJump",
+    rewardName: "Double Jump",
+    rewardDesc: "Tap jump again in mid-air to reach high signs & rooftops.",
+    rewardPoints: "High rings are worth +100 and rooftop rails score +5 a tick — the double jump is how you reach them.",
+    destShort: "Grocery Store",
+    building: "🛒",
+    length: 110,
+    speed: 5.8,
+  },
+  {
+    name: "Grandma",
+    dest: "Drive to Grandma's House",
+    parentLine: "Look at the cows, sweetie.",
+    childLine: "I can grind the power lines now!",
+    sky: ["#cfe9ff", "#9fd6a0"],
+    ground: "#a3d977",
+    groundDark: "#7fbf57",
+    far: "#bfe3a0",
+    house: ["#e8c39e", "#d4a373", "#fefae0", "#ccd5ae"],
+    spawn: { ring: 4, fence: 4, wire: 4, tree: 3, bush: 3, animal: 3, person: 1, gap: 3, spark: 7, mailbox: 2, hydrant: 1 },
+    reward: "magnet",
+    rewardName: "Spark Magnet",
+    rewardDesc: "Nearby sparks drift toward you automatically.",
+    rewardPoints: "Sparks are +10 each and now sweep into you mid-trick — collect a long arc without breaking stride.",
+    destShort: "Grandma's House",
+    building: "🏡",
+    length: 120,
+    speed: 6.2,
+  },
+  {
+    name: "Downtown",
+    dest: "Drive Through Downtown",
+    parentLine: "Hold on, traffic's crazy today.",
+    childLine: "Rooftops! Charged beam! Let's GO!",
+    sky: ["#a7b8e0", "#7a8cc0"],
+    ground: "#6d6f80",
+    groundDark: "#54566a",
+    far: "#8fa0cc",
+    house: ["#8d99ae", "#caa6f7", "#ffd166", "#06d6a0"],
+    spawn: { ring: 4, cone: 4, person: 4, bush: 2, cardboard: 2, sign_low: 3, fence: 3, wire: 3, parkedcar: 3, gap: 4, spark: 6 },
+    reward: "chargeLaser",
+    rewardName: "Charged Beam",
+    rewardDesc: "Hold X to charge a wider, longer imagination beam.",
+    rewardPoints: "Clear a whole row in one blast — that's +50 per object back-to-back, the fastest way to spike your multiplier.",
+    destShort: "Downtown",
+    building: "🏢",
+    length: 130,
+    speed: 7.0,
+  },
+  {
+    name: "Night",
+    dest: "Night Drive Home",
+    parentLine: "Almost home. You can sleep soon.",
+    childLine: "Dream mode... everything glows!",
+    sky: ["#241a4a", "#0e0a26"],
+    ground: "#2a2350",
+    groundDark: "#1c1838",
+    far: "#3a2f66",
+    house: ["#3d3a66", "#5a4f8a", "#2e2a52", "#473e7a"],
+    night: true,
+    spawn: { ring: 4, cardboard: 5, bush: 2, cone: 3, person: 2, wire: 3, fence: 3, parkedcar: 2, gap: 4, spark: 7 },
+    reward: "dreamDash",
+    rewardName: "Dream Dash",
+    rewardDesc: "Now your Sprint (Shift) blazes faster AND passes safely through hazards in a trail of stars.",
+    rewardPoints: "Sprint-clear a gap for +150, and dash straight through monsters you'd normally dodge — keep the chain unbroken.",
+    destShort: "Home",
+    building: "🏠",
+    length: 140,
+    speed: 7.6,
+  },
+];
+
+// Memory tokens per level (special collectible)
+const MEMORY = ["🔔", "🍎", "🍪", "🚦", "🌙"];
+
+// =============================================================================
+//  INPUT
+// =============================================================================
+const keys = {};
+const input = { jumpPressed: false, slide: false, laser: false, dash: false };
+
+function keyDown(e) {
+  const k = e.key.toLowerCase();
+  if ([" ", "arrowup", "arrowdown", "arrowleft", "arrowright", "w", "s"].includes(k)) e.preventDefault();
+  if (keys[k]) return; // ignore auto-repeat for edge actions
+  keys[k] = true;
+
+  if (game.state === "intro") { startFromCard(); return; }  // intro_screen card = title/start
+  if (game.state === "movie") return;                       // the movie is not skippable
+  if (game.state === "tutorial") {
+    if (k === " " || k === "enter") startGame();
+    return;
+  }
+  if (game.state === "gameOver" || game.state === "ending") {
+    if (k === " " || k === "enter") backToTitle();
+    return;
+  }
+  if (game.state === "destination") {
+    if (k === " " || k === "enter") openUpgrade();
+    return;
+  }
+  if (game.state === "upgrade") {
+    if (k === " " || k === "enter") nextLevel();
+    return;
+  }
+
+  // playing / paused
+  if (k === "p" || k === "escape") { togglePause(); return; }
+  if (k === "m") { game.muted = !game.muted; return; }
+  if (game.state !== "playing") return;
+
+  if (k === " " || k === "w" || k === "arrowup") doJump();
+  if (k === "x" || k === "k") input.laser = true;
+  if (k === "s" || k === "arrowdown") { player.grounded ? startSlide() : fastFall(); }
+  // Shift = Sprint — read continuously from keys[] in update(); no edge action needed
+}
+function keyUp(e) {
+  const k = e.key.toLowerCase();
+  keys[k] = false;
+  if (k === "x" || k === "k") { releaseLaser(); input.laser = false; }
+  if (k === "s" || k === "arrowdown") endSlide();
+}
+window.addEventListener("keydown", keyDown);
+window.addEventListener("keyup", keyUp);
+
+// ----- Touch / pointer controls ----------------------------------------------
+let touchStartY = 0, touchStartX = 0, touchStartT = 0, touchMoved = false;
+function onPointerDown(e) {
+  const t = e.touches ? e.touches[0] : e;
+  touchStartY = t.clientY; touchStartX = t.clientX; touchStartT = performance.now();
+  touchMoved = false;
+
+  if (game.state === "intro") { startFromCard(); return; }  // tap on the card
+  if (game.state === "movie") return;                       // not skippable
+  if (game.state === "tutorial") { startGame(); return; }
+  if (game.state === "gameOver" || game.state === "ending") { backToTitle(); return; }
+  if (game.state === "destination") { openUpgrade(); return; }
+  if (game.state === "upgrade") { nextLevel(); return; }
+  if (game.state === "paused") { togglePause(); return; }
+}
+function onPointerMove(e) {
+  if (game.state !== "playing") return;
+  const t = e.touches ? e.touches[0] : e;
+  const dy = t.clientY - touchStartY;
+  const dx = t.clientX - touchStartX;
+  if (Math.abs(dy) > 36 && dy > Math.abs(dx)) { player.grounded ? startSlide() : fastFall(); touchMoved = true; }
+}
+function onPointerUp(e) {
+  if (game.state !== "playing") { return; }
+  const dt = performance.now() - touchStartT;
+  endSlide();
+  if (touchMoved) return;
+  // tap on right third = laser, otherwise jump
+  const x = (e.changedTouches ? e.changedTouches[0].clientX : e.clientX);
+  if (x > window.innerWidth * 0.7 && upgrades.laser) {
+    input.laser = true; releaseLaser(); input.laser = false;
+  } else {
+    doJump();
+  }
+}
+canvas.addEventListener("touchstart", (e) => { e.preventDefault(); onPointerDown(e); }, { passive: false });
+canvas.addEventListener("touchmove", (e) => { e.preventDefault(); onPointerMove(e); }, { passive: false });
+canvas.addEventListener("touchend", (e) => { e.preventDefault(); onPointerUp(e); }, { passive: false });
+canvas.addEventListener("mousedown", onPointerDown);
+
+// =============================================================================
+//  PLAYER ACTIONS
+// =============================================================================
+function doJump() {
+  if (player.onRail) { // hop off rail
+    player.onRail = null; player.grounded = false; player.vy = JUMP_V; player.jumpsUsed = 1;
+    sfx("jump"); puff(player.x, player.y, "#fff");
+    return;
+  }
+  const maxJumps = upgrades.doubleJump ? 2 : 1;
+  if (player.jumpsUsed < maxJumps) {
+    player.vy = JUMP_V * (player.jumpsUsed === 0 ? 1 : 0.92);
+    player.grounded = false;
+    player.jumpsUsed++;
+    endSlide();
+    sfx(player.jumpsUsed === 2 ? "jump2" : "jump");
+    for (let i = 0; i < 6; i++) particles.push(spark(player.x, player.y + player.h/2, "#dff", 1));
+  }
+}
+function startSlide() {
+  if (!player.grounded || player.sliding) return;
+  player.sliding = true; player.slideT = SLIDE_DUR;
+  sfx("slide");
+}
+function endSlide() { player.sliding = false; player.slideT = 0; }
+
+// Press Down in mid-air to slam back to the ground fast (so you can jump again sooner)
+function fastFall() {
+  if (player.grounded || player.onRail) return;
+  player.vy = Math.max(player.vy, 9);
+  player.fastFalling = true;
+  for (let i = 0; i < 4; i++) particles.push(spark(player.x, player.y - player.h/2, "#bdf", 1));
+}
+
+function releaseLaser() {
+  if (!upgrades.laser) return;
+  const charged = upgrades.chargeLaser && player.laserCharge > 22;
+  fireLaser(charged);
+  player.laserCharge = 0;
+}
+function fireLaser(charged) {
+  player.lasering = charged ? 14 : 9;
+  const range = (charged ? 520 : 300);
+  const top = player.y - player.h + (player.sliding ? 22 : 4);
+  const beamH = charged ? 70 : 30;
+  let hits = 0;
+  for (const o of objects) {
+    if (!o.destructible || o.dead) continue;
+    if (o.x + o.w < player.x) continue;
+    if (o.x > player.x + range) continue;
+    const oy = o.y - o.h;
+    if (oy < top + beamH && o.y > top - 8) {
+      o.dead = true; hits++;
+      addScore(50, o.x, oy, "+50");
+      bumpCombo();
+      burst(o.x, o.y - o.h/2, o.tint || "#9f6", 18);
+      sfx("zap");
+    }
+  }
+  sfx(charged ? "beambig" : "beam");
+  if (charged) game.flash = 0.18;
+}
+
+// =============================================================================
+//  OBJECT SPAWNING
+// =============================================================================
+let objects = [];
+let particles = [];
+let floaters = [];   // floating score text
+
+function weightedPick(table) {
+  let total = 0;
+  for (const k in table) total += table[k];
+  let r = Math.random() * total;
+  for (const k in table) { r -= table[k]; if (r <= 0) return k; }
+  return Object.keys(table)[0];
+}
+
+function spawn() {
+  const lvl = LEVELS[game.levelIndex];
+  const type = weightedPick(lvl.spawn);
+  const baseX = W + 60;
+  let o = { type, x: baseX, w: 44, h: 44, dead: false, destructible: false, tint: null, t: Math.random()*100 };
+
+  switch (type) {
+    case "ring":
+      o.w = 8; o.h = 86; o.r = 46;
+      o.y = GROUND_Y - 70 - (Math.random() < 0.4 ? 90 : 0);
+      o.collected = false; o.kind = "ring";
+      // chance of a memory token inside the ring's path
+      break;
+    case "spark":
+      o.w = 18; o.h = 18; o.kind = "spark";
+      o.y = GROUND_Y - 40 - Math.random() * 150;
+      o.collected = false;
+      // sometimes a vertical arc of sparks
+      if (Math.random() < 0.5) { spawnSparkArc(baseX); return; }
+      break;
+    case "mailbox":
+      o.w = 40; o.h = 46; o.y = GROUND_Y; o.kind = "bounce"; o.tint = "#5b8def"; break;
+    case "hydrant":
+      o.w = 30; o.h = 44; o.y = GROUND_Y; o.kind = "bounce"; o.bounceHi = true; o.tint = "#e85d5d"; break;
+    case "parkedcar":
+      o.w = 120; o.h = 56; o.y = GROUND_Y; o.kind = "bounce"; o.tint = "#f4a261"; break;
+    case "bush":
+      o.w = 54; o.h = 40; o.y = GROUND_Y; o.kind = "hazard"; o.destructible = true; o.tint = "#4caf50"; break;
+    case "tree":
+      o.w = 50; o.h = 120; o.y = GROUND_Y; o.kind = "hazard"; o.destructible = true; o.tint = "#3d8b40"; o.big = true; break;
+    case "cardboard":
+      o.w = 46; o.h = 70; o.y = GROUND_Y; o.kind = "hazard"; o.destructible = true; o.tint = "#9b6dd6"; o.zombie = true; break;
+    case "cone":
+      o.w = 30; o.h = 36; o.y = GROUND_Y; o.kind = "trip"; o.tint = "#ff9f43"; break;
+    case "sign_low":
+      // bottom of sign sits low enough that a standing player hits it but a slide clears it
+      o.w = 70; o.h = 30; o.y = GROUND_Y - 44; o.kind = "low"; o.tint = "#ffd166"; break;
+    case "person":
+      o.w = 26; o.h = 60; o.y = GROUND_Y; o.kind = "avoid"; o.tint = "#ffb3a0"; o.walk = Math.random()*6.28; break;
+    case "animal":
+      o.w = 44; o.h = 30; o.y = GROUND_Y; o.kind = "avoid"; o.tint = "#caa472"; o.dog = true; break;
+    case "fence":
+      o.w = 180 + Math.random()*120; o.h = 8; o.y = RAIL_Y + 40; o.kind = "rail"; o.tint = "#c98b53"; break;
+    case "wire":
+      o.w = 220 + Math.random()*160; o.h = 6; o.y = RAIL_Y - 30; o.kind = "rail"; o.tint = "#444"; break;
+    case "gap":
+      // a hole in the road: jump it, or Sprint (Shift) across for a bonus
+      o.w = 90 + Math.random()*80; o.h = H - GROUND_Y; o.y = GROUND_Y; o.kind = "gap"; break;
+  }
+  objects.push(o);
+
+  // occasionally drop a memory token high up
+  if (Math.random() < 0.02) {
+    objects.push({ type: "memory", kind: "memory", x: baseX + 30, y: GROUND_Y - 180, w: 30, h: 30, dead: false, collected: false, t: 0 });
+  }
+}
+
+function spawnSparkArc(baseX) {
+  const n = 5 + Math.floor(Math.random()*3);
+  const peak = GROUND_Y - 120 - Math.random()*60;
+  for (let i = 0; i < n; i++) {
+    const t = i / (n - 1);
+    const y = GROUND_Y - 40 - Math.sin(t * Math.PI) * (GROUND_Y - 40 - peak);
+    objects.push({ type: "spark", kind: "spark", x: baseX + i * 46, y, w: 18, h: 18, dead: false, collected: false, t: i });
+  }
+}
+
+// The big destination building that physically ends the ride when you reach it.
+function spawnDestination(lvl) {
+  const o = { type: "destination", kind: "destination", x: W + 140,
+              y: GROUND_Y, w: 300, h: 360, dead: false, t: 0, lvl: lvl };
+  objects.push(o);
+  game.endBuilding = o;
+}
+
+// =============================================================================
+//  PARTICLES & EFFECTS
+// =============================================================================
+function spark(x, y, color, scale = 1) {
+  return {
+    x, y, vx: (Math.random()-0.5)*4, vy: (Math.random()-0.7)*5,
+    life: 30 + Math.random()*20, max: 50, color, size: (2+Math.random()*3)*scale, g: 0.18, kind: "dot"
+  };
+}
+function burst(x, y, color, n) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random()*Math.PI*2, s = 1+Math.random()*5;
+    particles.push({ x, y, vx: Math.cos(a)*s, vy: Math.sin(a)*s - 1, life: 26+Math.random()*22, max: 48,
+      color: i%3===0 ? "#fff" : color, size: 2+Math.random()*4, g: 0.16, kind: Math.random()<0.4?"star":"dot" });
+  }
+}
+function puff(x, y, color) {
+  for (let i = 0; i < 8; i++) {
+    const a = Math.random()*Math.PI*2;
+    particles.push({ x, y, vx: Math.cos(a)*1.5, vy: Math.sin(a)*1.5 - 0.5, life: 20, max: 20, color, size: 4+Math.random()*5, g: 0, kind: "smoke" });
+  }
+}
+function confetti(x, y) {
+  const cols = ["#ff6b6b","#ffd93d","#6bcb77","#4d96ff","#c780fa","#ff9f43"];
+  for (let i = 0; i < 40; i++) {
+    const a = Math.random()*Math.PI*2, s = 2+Math.random()*7;
+    particles.push({ x, y, vx: Math.cos(a)*s, vy: Math.sin(a)*s - 4, life: 60+Math.random()*40, max: 100,
+      color: cols[(Math.random()*cols.length)|0], size: 3+Math.random()*4, g: 0.12, kind: "confetti", spin: Math.random()*6 });
+  }
+}
+
+function addScore(base, x, y, label) {
+  const mult = comboMult();
+  const pts = Math.round(base * mult);
+  game.score += pts;
+  if (x !== undefined) floaters.push({ x, y, vy: -0.8, life: 50, max: 50, text: label || ("+"+pts), color: "#fff" });
+}
+function comboMult() { return 1 + Math.min(game.combo, 20) * 0.25; }
+function bumpCombo() {
+  game.combo++;
+  game.comboTimer = 130;
+  game.bestCombo = Math.max(game.bestCombo, game.combo);
+}
+function breakCombo() {
+  if (game.combo >= 4) floaters.push({ x: W/2, y: H/2 - 40, vy: -0.5, life: 40, max: 40, text: "Chain broke!", color: "#ffb3b3" });
+  game.combo = 0; game.comboTimer = 0;
+}
+
+// =============================================================================
+//  AUDIO (tiny WebAudio synth — no files)
+// =============================================================================
+let actx = null;
+function audioInit() { if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch(e){} } }
+function tone(freq, dur, type = "sine", vol = 0.12, slideTo = null) {
+  if (game.muted || !actx) return;
+  const t = actx.currentTime;
+  const osc = actx.createOscillator();
+  const g = actx.createGain();
+  osc.type = type; osc.frequency.setValueAtTime(freq, t);
+  if (slideTo) osc.frequency.exponentialRampToValueAtTime(slideTo, t + dur);
+  g.gain.setValueAtTime(vol, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  osc.connect(g); g.connect(actx.destination);
+  osc.start(t); osc.stop(t + dur);
+}
+function sfx(name) {
+  if (game.muted || !actx) return;
+  switch (name) {
+    case "jump":   tone(420, 0.16, "square", 0.10, 720); break;
+    case "jump2":  tone(620, 0.16, "square", 0.10, 980); break;
+    case "slide":  tone(240, 0.18, "sawtooth", 0.07, 120); break;
+    case "ring":   tone(880, 0.10, "sine", 0.12, 1320); setTimeout(()=>tone(1320,0.10,"sine",0.10),60); break;
+    case "spark":  tone(1040 + Math.random()*200, 0.07, "triangle", 0.07); break;
+    case "memory": tone(660,0.1,"sine",0.12,990); setTimeout(()=>tone(990,0.12,"sine",0.1,1480),80); break;
+    case "bounce": tone(300, 0.14, "square", 0.11, 760); break;
+    case "beam":   tone(900, 0.12, "sawtooth", 0.08, 300); break;
+    case "beambig":tone(700, 0.2, "sawtooth", 0.10, 180); break;
+    case "zap":    tone(1200 + Math.random()*400, 0.08, "square", 0.08, 200); break;
+    case "hit":    tone(200, 0.25, "sawtooth", 0.14, 70); break;
+    case "dash":   tone(500, 0.2, "triangle", 0.10, 1100); break;
+    case "win":    [523,659,784,1046].forEach((f,i)=>setTimeout(()=>tone(f,0.18,"triangle",0.12),i*110)); break;
+    case "lose":   [400,330,260,180].forEach((f,i)=>setTimeout(()=>tone(f,0.22,"sawtooth",0.12),i*120)); break;
+  }
+}
+
+// =============================================================================
+//  COLLISION
+// =============================================================================
+function playerBox() {
+  const h = player.sliding ? player.h * 0.5 : player.h;
+  return { x: player.x - player.w/2, y: player.y - h, w: player.w, h: h };
+}
+function objBox(o) { return { x: o.x, y: o.y - o.h, w: o.w, h: o.h }; }
+function hit(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+function takeHit(kind) {
+  if (player.invuln > 0) return;
+  if (player.hasShield) {
+    player.hasShield = false; player.invuln = 50;
+    floaters.push({ x: player.x, y: player.y - 70, vy: -0.8, life: 45, max: 45, text: "Shield!", color: "#9ff" });
+    sfx("bounce"); puff(player.x, player.y - 30, "#9ff"); breakCombo();
+    return;
+  }
+  player.focus--; player.invuln = 70; player.hurtT = 26; game.shake = 14;
+  game.slowT = SLOW_DUR;            // brief stumble; speed recovers on its own
+  breakCombo(); sfx("hit");
+  puff(player.x, player.y - 30, "#ff8");
+  if (player.focus <= 0) {
+    player.focus = 0;
+    floaters.push({ x: player.x, y: player.y - 80, vy: -0.5, life: 60, max: 60, text: "Oof!", color: "#ffd" });
+  }
+}
+
+// =============================================================================
+//  UPDATE
+// =============================================================================
+// ----- intro cutscene timing -----
+const CUT_FADE = 120;   // 2s crossfade between images (@60fps)
+const CUT_HOLD = 75;    // brief hold after each image settles
+// pressing the intro_screen card: first time plays the movie, later just starts
+function startFromCard() { if (game.introSeen) openTutorial(); else startMovie(); }
+function startMovie() { game.state = "movie"; game.cutIndex = 0; game.cutT = 0; }
+function updateMovie() {
+  game.cutT++;
+  if (game.cutT >= CUT_FADE + CUT_HOLD) {
+    game.cutIndex++; game.cutT = 0;
+    if (game.cutIndex >= MOVIE_SEQ.length) finishMovie();
+  }
+}
+function finishMovie() { game.introSeen = true; game.cutIndex = 0; game.cutT = 0; openTutorial(); }
+
+function update() {
+  game.time++;
+  if (game.shake > 0) game.shake *= 0.86;
+  if (game.flash > 0) game.flash -= 0.02;
+
+  if (game.state === "intro") return;                 // gate: wait for any button
+  if (game.state === "movie") { updateMovie(); return; }
+  if (game.state !== "playing") { updateParticles(); return; }
+
+  const lvl = LEVELS[game.levelIndex];
+
+  // ----- speed: base ramp, Sprint boost, low-imagination & arrival slowdowns -----
+  player.sprinting = (keys["shift"] === true);
+  let spd = game.baseSpeed + game.distance * 0.00018;
+  if (game.slowT > 0) spd *= 1 - 0.5 * (game.slowT / SLOW_DUR); // brief stumble after a hit, recovers
+  if (player.sprinting) {
+    spd *= upgrades.dreamDash ? 1.85 : 1.5;                 // Dream Dash: faster + safe sprint
+    if (upgrades.dreamDash) player.invuln = Math.max(player.invuln, 4);
+    if (game.time % 2 === 0) particles.push({ x: player.x - 16, y: player.y - 18 - Math.random()*26,
+      vx: -3 - Math.random()*3, vy: 0, life: 14, max: 14,
+      color: upgrades.dreamDash ? "#9ff" : "#fff", size: 2 + Math.random()*2, g: 0, kind: "dot" });
+  }
+  if (game.endBuilding) {                                   // ease to a stop as the building rolls up
+    const d = game.endBuilding.x - player.x;
+    if (d < 460) spd *= Math.max(0.4, d / 460);
+  }
+  game.speed = spd;
+  game.distance += game.speed;
+
+  // ----- progress is distance toward the destination building (not a timer/score) -----
+  const rideDist = lvl.length * 78;
+  if (!game.endBuilding) {
+    game.progress = Math.min(99.5, (game.distance / rideDist) * 100);
+    if (game.distance >= rideDist) spawnDestination(lvl);   // big building rolls in from the right
+  } else {
+    game.progress = 100;                                    // "Arriving!"
+  }
+
+  // ----- player physics -----
+  player.runCycle += game.speed * 0.06;
+  if (player.invuln > 0) player.invuln--;
+  if (player.lasering > 0) player.lasering--;
+  if (player.hurtT > 0) player.hurtT--;
+  if (player.landT > 0) player.landT--;
+  if (game.slowT > 0) game.slowT--;
+  if (game.comboTimer > 0) { game.comboTimer--; if (game.comboTimer === 0) breakCombo(); }
+
+  // ----- free horizontal movement (Left/Right arrows or A/D) -----
+  let hx = 0;
+  if (keys["arrowleft"] || keys["a"]) hx -= 1;
+  if (keys["arrowright"] || keys["d"]) hx += 1;
+  if (hx !== 0) {
+    player.x += hx * PLAYER_HSPEED;
+    player.x = Math.max(PLAYER_X_MIN, Math.min(PLAYER_X_MAX, player.x));
+    player.facing = hx;
+  }
+
+  // charge laser while X held
+  if (upgrades.chargeLaser && (keys["x"] || keys["k"])) player.laserCharge++;
+
+  if (player.sliding) { player.slideT--; if (player.slideT <= 0) endSlide(); }
+
+  if (player.onRail) {
+    // grinding: stick to rail top, score per frame
+    const rail = player.onRail;
+    player.y = rail.y;
+    player.vy = 0;
+    player.grounded = false;
+    player.jumpsUsed = 0;
+    if (game.time % 4 === 0) { addScore(5, player.x, player.y - 60, "+5"); bumpCombo(); }
+    if (game.time % 8 === 0) particles.push(spark(player.x - 12, player.y, "#ffd24d"));
+    // fall off when rail passes
+    if (rail.x + rail.w < player.x - 4 || rail.dead) { player.onRail = null; }
+  } else {
+    player.vy += GRAVITY;
+    if (player.fastFalling) player.vy += GRAVITY * 1.4;   // Down-in-air slams you back to the ground
+    player.y += player.vy;
+    if (player.y >= GROUND_Y) {
+      player.y = GROUND_Y; player.vy = 0;
+      if (!player.grounded) { puff(player.x, GROUND_Y, "#fff"); player.landT = 7; }
+      player.grounded = true; player.jumpsUsed = 0; player.fastFalling = false;
+    } else {
+      player.grounded = false;
+    }
+  }
+
+  // ----- spawn objects (stops once the destination building is on its way in) -----
+  if (!game.endBuilding) {
+    game.spawnCooldown -= game.speed;
+    if (game.spawnCooldown <= 0) {
+      spawn();
+      game.spawnCooldown = 150 + Math.random() * 150;
+    }
+  }
+
+  // ----- move & resolve objects -----
+  const pb = playerBox();
+  for (const o of objects) {
+    o.x -= game.speed;
+    o.t = (o.t || 0) + 1;
+    if (o.kind === "person" || o.kind === "avoid") { /* small idle motion handled in draw */ }
+
+    if (o.dead || o.collected) continue;
+    const ob = objBox(o);
+
+    // magnet pull for sparks
+    if (upgrades.magnet && (o.kind === "spark" || o.kind === "memory")) {
+      const dx = player.x - o.x, dy = (player.y - 30) - o.y;
+      const d = Math.hypot(dx, dy);
+      if (d < 180) { o.x += dx/d * 4.2; o.y += dy/d * 4.2; }
+    }
+
+    switch (o.kind) {
+      case "ring":
+        // scoring when passing through the ring opening
+        if (!o.collected && Math.abs(o.x - player.x) < 8) {
+          const top = o.y - o.r, bot = o.y + o.r;
+          const py = player.y - playerBox().h/2;
+          if (py > top && py < bot) {
+            o.collected = true; addScore(100, o.x, o.y - o.r, "RING +100"); bumpCombo();
+            burst(o.x, o.y, "#ffd166", 16); sfx("ring");
+          }
+        }
+        break;
+      case "spark":
+        if (hit(pb, ob)) { o.collected = true; addScore(10, o.x, o.y, "+10"); for(let i=0;i<5;i++) particles.push(spark(o.x,o.y,"#ffe66d")); sfx("spark"); bumpCombo(); }
+        break;
+      case "memory":
+        if (hit(pb, ob)) { o.collected = true; addScore(250, o.x, o.y, "MEMORY +250"); burst(o.x,o.y,"#9ff",22); sfx("memory"); bumpCombo(); }
+        break;
+      case "bounce":
+        if (hit(pb, ob) && player.vy >= 0 && (player.y - player.vy) <= o.y - o.h + 16) {
+          // land on top → bounce
+          player.vy = (o.bounceHi ? JUMP_V*1.35 : JUMP_V) * (upgrades.bigBounce ? 1.25 : 1);
+          player.y = o.y - o.h - 2; player.grounded = false; player.jumpsUsed = 1;
+          addScore(o.bounceHi ? 90 : 75, o.x, o.y - o.h, "BOUNCE"); bumpCombo();
+          burst(o.x, o.y - o.h, o.tint, 12); sfx("bounce");
+        } else if (hit(pb, ob)) {
+          // hit the side
+          takeHit("bump");
+        }
+        break;
+      case "rail":
+        // landing on a rail from above → grind
+        if (!player.onRail && player.vy >= 0) {
+          const py = player.y;
+          if (py >= o.y - 12 && py <= o.y + 14 &&
+              player.x > o.x - 6 && player.x < o.x + o.w) {
+            player.onRail = o; player.y = o.y; player.vy = 0;
+            floaters.push({ x: player.x, y: o.y - 50, vy: -0.6, life: 30, max: 30, text: "GRIND!", color: "#ffd24d" });
+          }
+        }
+        break;
+      case "hazard": // bush / tree / cardboard — destructible, hurts if you run into it
+        if (hit(pb, ob)) {
+          if (o.big) { takeHit("crash"); } // big tree: real obstacle
+          else { takeHit("bump"); }
+        }
+        break;
+      case "trip": // cone
+        if (hit(pb, ob)) { takeHit("trip"); o.dead = true; }
+        break;
+      case "low": // low sign — must slide under
+        if (hit(pb, ob)) { takeHit("low"); }
+        break;
+      case "avoid": // person / animal — never attack, avoid
+        if (hit(pb, ob)) { takeHit("avoid"); o.bonked = 12; }
+        else if (o.bonked) o.bonked--;
+        // perfect dodge bonus: jumped over closely
+        if (!o.dodged && o.x + o.w < player.x && player.grounded === false) {
+          o.dodged = true; addScore(100, o.x, o.y - o.h - 10, "DODGE +100"); bumpCombo();
+          floaters.push({ x: o.x, y: o.y - o.h - 30, vy: -0.7, life: 35, max: 35, text: "✦", color: "#9ff" });
+        }
+        break;
+      case "gap": // hole in the road — jump it or Sprint across for a bonus
+        if (player.x > o.x + 6 && player.x < o.x + o.w - 6) {
+          const safe = !player.grounded || player.onRail || player.sprinting;
+          if (!safe && !o.fell) { takeHit("gap"); o.fell = true; }
+        }
+        if (!o.cleared && o.x + o.w < player.x) {
+          o.cleared = true;
+          if (!o.fell) {
+            addScore(150, player.x, player.y - 70, player.sprinting ? "SPRINT GAP +150" : "GAP +150");
+            bumpCombo();
+            for (let i = 0; i < 8; i++) particles.push(spark(player.x, player.y - 10, "#9ff"));
+          }
+        }
+        break;
+      case "destination": // reaching the big building naturally ends the ride
+        if (o.x <= player.x + 8) { reachDestination(); return; }
+        break;
+    }
+  }
+
+  // laser auto-fire if held & no charge upgrade (continuous trim)
+  if (input.laser && upgrades.laser && !upgrades.chargeLaser && player.lasering <= 0) {
+    fireLaser(false);
+  }
+
+  // cull objects that have scrolled off the left edge
+  objects = objects.filter(o => o.x + (o.w || 60) > -80);
+
+  updateParticles();
+}
+
+function updateParticles() {
+  for (const p of particles) {
+    p.x -= (game.state === "playing" ? game.speed * 0.4 : 0);
+    p.x += p.vx; p.y += p.vy; p.vy += p.g; p.life--;
+    if (p.spin !== undefined) p.spin += 0.3;
+  }
+  particles = particles.filter(p => p.life > 0);
+  for (const f of floaters) { f.y += f.vy; f.life--; if (game.state==="playing") f.x -= game.speed*0.3; }
+  floaters = floaters.filter(f => f.life > 0);
+}
+
+// =============================================================================
+//  STATE TRANSITIONS
+// =============================================================================
+function startGame() {
+  audioInit();
+  game.levelIndex = 0;
+  game.score = 0;
+  game.bestCombo = 0;
+  // reset upgrades for a fresh run
+  for (const k in upgrades) upgrades[k] = false;
+  beginLevel();
+}
+function beginLevel() {
+  const lvl = LEVELS[game.levelIndex];
+  game.state = "playing";
+  game.progress = 0;
+  game.combo = 0; game.comboTimer = 0;
+  game.distance = 0;
+  game.baseSpeed = lvl.speed;
+  game.speed = lvl.speed;
+  game.spawnCooldown = 60;
+  game.endBuilding = null;
+  game.slowT = 0;
+  objects = []; particles = []; floaters = [];
+  player.x = PLAYER_X; player.y = GROUND_Y; player.vy = 0;
+  player.grounded = true; player.jumpsUsed = 0; player.onRail = null;
+  player.focus = player.maxFocus; player.invuln = 30;
+  player.sliding = false; player.lasering = 0; player.laserCharge = 0;
+  player.sprinting = false; player.fastFalling = false;
+  player.hurtT = 0; player.landT = 0;
+  player.hasShield = upgrades.shield;
+}
+function openTutorial() { game.state = "tutorial"; }
+function reachDestination() {
+  game.state = "destination";
+  game.score += 1000;
+  confetti(W/2, H/2);
+  confetti(W*0.3, H*0.4); confetti(W*0.7, H*0.4);
+  sfx("win");
+}
+function openUpgrade() {
+  game.state = "upgrade";
+  const lvl = LEVELS[game.levelIndex];
+  upgrades[lvl.reward] = true;
+  if (lvl.reward === "shield") player.hasShield = true;
+}
+function nextLevel() {
+  game.levelIndex++;
+  if (game.levelIndex >= LEVELS.length) { endingScreen(); return; }
+  beginLevel();
+}
+function endingScreen() {
+  game.state = "ending";
+  if (game.score > game.highScore) { game.highScore = game.score; save("dreamride_high", game.highScore); }
+  confetti(W/2, H*0.4); sfx("win");
+}
+function gameOver() {
+  game.state = "gameOver";
+  if (game.score > game.highScore) { game.highScore = game.score; save("dreamride_high", game.highScore); }
+  sfx("lose");
+}
+// after a game, return to the combined title + controls screen (the tutorial)
+function backToTitle() { openTutorial(); }
+function togglePause() {
+  if (game.state === "playing") game.state = "paused";
+  else if (game.state === "paused") game.state = "playing";
+}
+
+// =============================================================================
+//  RENDER
+// =============================================================================
+function draw() {
+  if (game.state === "intro") { drawIntroGate(); return; }
+  if (game.state === "movie") { drawMovie(); return; }
+  // clamp: after the final ride levelIndex points past the array (ending screen)
+  const lvl = LEVELS[Math.min(game.levelIndex, LEVELS.length - 1)];
+  ctx.save();
+  // screen shake
+  if (game.shake > 0.5) ctx.translate((Math.random()-0.5)*game.shake, (Math.random()-0.5)*game.shake);
+
+  drawWorld(lvl);
+
+  if (game.state === "playing" || game.state === "paused" || game.state === "destination" || game.state === "upgrade") {
+    drawObjects(lvl);
+    drawPlayer(lvl);
+    drawParticles();
+    drawFloaters();
+    drawCar(lvl);
+    drawHUD(lvl);
+  }
+
+  ctx.restore();
+
+  // flash overlay
+  if (game.flash > 0) { ctx.fillStyle = `rgba(255,255,255,${game.flash})`; ctx.fillRect(0,0,W,H); }
+
+  // state screens
+  if (game.state === "tutorial") drawTutorial();
+  else if (game.state === "paused") drawPause();
+  else if (game.state === "destination") drawDestination(lvl);
+  else if (game.state === "upgrade") drawUpgrade(lvl);
+  else if (game.state === "gameOver") drawGameOver();
+  else if (game.state === "ending") drawEnding();
+}
+
+// ---- intro cutscene rendering: intro_screen then 2s crossfades into cut1..cut4 ----
+function drawCover(key, alpha) {
+  if (!imgReady(key) || alpha <= 0) return;
+  const im = IMG[key];
+  const s = Math.max(W / im.naturalWidth, H / im.naturalHeight); // cover-fit
+  const w = im.naturalWidth * s, h = im.naturalHeight * s;
+  ctx.globalAlpha = Math.min(1, alpha);
+  ctx.drawImage(im, (W - w) / 2, (H - h) / 2, w, h);
+  ctx.globalAlpha = 1;
+}
+// the press-to-start gate: shows the intro slide and waits for any button
+function drawIntroGate() {
+  ctx.fillStyle = "#000"; ctx.fillRect(0, 0, W, H);
+  drawCover("introScene", 1);
+  // gentle pulsing chevron to signal it's interactive (the card already reads "Press Any Button")
+  ctx.globalAlpha = 0.45 + 0.4 * Math.sin(game.time * 0.12);
+  ctx.fillStyle = "#fff"; ctx.font = "bold 22px Trebuchet MS";
+  ctx.textAlign = "center"; ctx.textBaseline = "bottom";
+  ctx.fillText("▶", W / 2, H - 14);
+  ctx.globalAlpha = 1;
+}
+// the (non-skippable) movie: cut1 → cut2 → cut3 → cut4 with 2s crossfades
+function drawMovie() {
+  ctx.fillStyle = "#000"; ctx.fillRect(0, 0, W, H);
+  const i = game.cutIndex;
+  const fade = Math.min(1, game.cutT / CUT_FADE);
+  const prev = i > 0 ? MOVIE_SEQ[i - 1] : "introScene"; // cut1 fades up from the intro slide
+  drawCover(prev, 1);
+  drawCover(MOVIE_SEQ[i], fade);
+}
+
+function lerpScroll(factor) { return (game.distance * factor) % 1000; }
+
+function drawWorld(lvl) {
+  // sky gradient
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, lvl.sky[0]); g.addColorStop(1, lvl.sky[1]);
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+
+  // sun / moon
+  if (lvl.night) {
+    ctx.fillStyle = "#fdf6c9";
+    ctx.beginPath(); ctx.arc(W - 130, 110, 46, 0, 7); ctx.fill();
+    ctx.fillStyle = lvl.sky[0];
+    ctx.beginPath(); ctx.arc(W - 110, 96, 40, 0, 7); ctx.fill();
+    // stars
+    for (let i = 0; i < 40; i++) {
+      const sx = (i * 137.5 - game.distance*0.05) % W;
+      const sy = (i * 53) % (H*0.5);
+      ctx.fillStyle = "rgba(255,255,255," + (0.3 + 0.5*Math.sin(game.time*0.05 + i)) + ")";
+      ctx.fillRect((sx+W)%W, sy, 2, 2);
+    }
+  } else {
+    ctx.fillStyle = "rgba(255,247,200,0.9)";
+    ctx.beginPath(); ctx.arc(W - 120, 100, 50, 0, 7); ctx.fill();
+  }
+
+  // far clouds (parallax slow)
+  const cloudCol = lvl.night ? "rgba(80,70,130,0.5)" : "rgba(255,255,255,0.85)";
+  ctx.fillStyle = cloudCol;
+  for (let i = 0; i < 6; i++) {
+    let cx = (i * 220 - lerpScroll(0.12) * 2) % (W + 240) ; cx = ((cx % (W+240)) + (W+240)) % (W+240) - 120;
+    const cy = 60 + (i % 3) * 36;
+    cloud(cx, cy, 1 + (i%2)*0.4);
+  }
+
+  // distant houses / buildings (parallax medium)
+  drawSkyline(lvl);
+
+  // ground
+  ctx.fillStyle = lvl.ground;
+  ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
+  ctx.fillStyle = lvl.groundDark;
+  ctx.fillRect(0, GROUND_Y, W, 8);
+  // ground stripes scrolling
+  ctx.fillStyle = "rgba(0,0,0,0.07)";
+  for (let i = 0; i < 24; i++) {
+    let x = (i * 80 - (game.distance % 80)) ;
+    ctx.fillRect(x, GROUND_Y + 30, 40, 6);
+  }
+}
+
+function cloud(x, y, s) {
+  ctx.beginPath();
+  ctx.arc(x, y, 22*s, 0, 7); ctx.arc(x+26*s, y+6, 18*s, 0, 7);
+  ctx.arc(x-24*s, y+8, 16*s, 0, 7); ctx.arc(x+8*s, y-12*s, 18*s, 0, 7);
+  ctx.fill();
+}
+
+function drawSkyline(lvl) {
+  const downtown = lvl.name === "Downtown" || lvl.name === "Night";
+  const baseY = GROUND_Y;
+  const scroll = lerpScroll(0.4) * 2;
+  for (let i = -1; i < 9; i++) {
+    const seed = i * 9301 % 233280;
+    const r = (Math.abs(Math.sin(i*12.9898))*43758.5453) % 1;
+    let x = (i * 150 - scroll) % (W + 300); x = ((x % (W+300)) + (W+300)) % (W+300) - 150;
+    const col = lvl.house[(i % lvl.house.length + lvl.house.length) % lvl.house.length];
+    if (downtown) {
+      const bh = 120 + r * 200;
+      ctx.fillStyle = col;
+      ctx.fillRect(x, baseY - bh, 110, bh);
+      // windows
+      ctx.fillStyle = lvl.night ? "rgba(255,230,120,0.8)" : "rgba(255,255,255,0.5)";
+      for (let wy = baseY - bh + 16; wy < baseY - 16; wy += 26) {
+        for (let wx = x + 12; wx < x + 98; wx += 24) {
+          if ((Math.sin(wx*wy) > -0.3)) ctx.fillRect(wx, wy, 12, 14);
+        }
+      }
+    } else {
+      const bw = 96, bh = 70 + r * 30;
+      ctx.fillStyle = col;
+      ctx.fillRect(x, baseY - bh, bw, bh);
+      // roof
+      ctx.fillStyle = "rgba(0,0,0,0.18)";
+      ctx.beginPath(); ctx.moveTo(x-8, baseY-bh); ctx.lineTo(x+bw/2, baseY-bh-34); ctx.lineTo(x+bw+8, baseY-bh); ctx.closePath(); ctx.fill();
+      // door + window
+      ctx.fillStyle = "rgba(255,255,255,0.55)";
+      ctx.fillRect(x+14, baseY-32, 18, 18);
+      ctx.fillStyle = "rgba(120,80,40,0.6)";
+      ctx.fillRect(x+bw-34, baseY-40, 20, 40);
+    }
+  }
+}
+
+// ---- object drawing ----
+function drawObjects(lvl) {
+  for (const o of objects) {
+    if (o.collected && o.kind !== "rail") continue;
+    if (o.dead && o.kind !== "rail") continue;
+    ctx.save();
+    switch (o.kind) {
+      case "ring": drawRing(o); break;
+      case "spark": drawSpark(o); break;
+      case "memory": drawMemory(o); break;
+      case "bounce": drawBounce(o); break;
+      case "rail": drawRail(o); break;
+      case "hazard": o.zombie ? drawZombie(o) : (o.big ? drawTree(o) : drawBush(o)); break;
+      case "trip": drawCone(o); break;
+      case "low": drawLowSign(o); break;
+      case "avoid": o.dog ? drawAnimal(o) : drawPerson(o); break;
+      case "gap": drawGap(o, lvl); break;
+      case "destination": drawDestinationBuilding(o, lvl); break;
+    }
+    ctx.restore();
+  }
+}
+
+function drawGap(o, lvl) {
+  // dark pit cut into the road
+  ctx.fillStyle = lvl.night ? "#0b0820" : "#3a2d1f";
+  ctx.fillRect(o.x, GROUND_Y, o.w, H - GROUND_Y);
+  // crumbling edges
+  ctx.fillStyle = lvl.groundDark;
+  ctx.beginPath();
+  ctx.moveTo(o.x, GROUND_Y); ctx.lineTo(o.x + 14, GROUND_Y + 12); ctx.lineTo(o.x + 14, GROUND_Y); ctx.fill();
+  ctx.beginPath();
+  ctx.moveTo(o.x + o.w, GROUND_Y); ctx.lineTo(o.x + o.w - 14, GROUND_Y + 12); ctx.lineTo(o.x + o.w - 14, GROUND_Y); ctx.fill();
+  // little "MIND THE GAP" sprint hint floating over it
+  ctx.fillStyle = "rgba(255,255,255,0.5)"; ctx.font = "bold 13px Trebuchet MS";
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText("⚡ gap", o.x + o.w/2, GROUND_Y + 24);
+}
+
+function drawDestinationBuilding(o, lvl) {
+  const x = o.x, baseY = GROUND_Y, w = o.w, h = o.h;
+  // body
+  ctx.fillStyle = lvl.house[0];
+  roundRect(x, baseY - h, w, h, 10); ctx.fill();
+  // roof
+  ctx.fillStyle = "rgba(0,0,0,0.22)";
+  ctx.beginPath(); ctx.moveTo(x - 16, baseY - h); ctx.lineTo(x + w/2, baseY - h - 56); ctx.lineTo(x + w + 16, baseY - h); ctx.closePath(); ctx.fill();
+  // windows grid
+  ctx.fillStyle = lvl.night ? "rgba(255,230,120,0.9)" : "rgba(255,255,255,0.7)";
+  for (let wy = baseY - h + 40; wy < baseY - 110; wy += 56) {
+    for (let wx = x + 30; wx < x + w - 30; wx += 64) ctx.fillRect(wx, wy, 38, 40);
+  }
+  // big door
+  ctx.fillStyle = "rgba(90,60,30,0.85)";
+  roundRect(x + w/2 - 40, baseY - 100, 80, 100, 8); ctx.fill();
+  // sign with the destination icon + name
+  ctx.fillStyle = "#fff"; roundRect(x + w/2 - 80, baseY - h - 4, 160, 44, 10); ctx.fill();
+  ctx.fillStyle = "#222"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.font = "26px serif"; ctx.fillText(lvl.building, x + w/2 - 56, baseY - h + 18);
+  ctx.font = "bold 16px Trebuchet MS";
+  ctx.fillText(lvl.destShort, x + w/2 + 14, baseY - h + 18);
+  // welcoming flag
+  ctx.strokeStyle = "#888"; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(x + w/2, baseY - h - 56); ctx.lineTo(x + w/2, baseY - h - 96); ctx.stroke();
+  ctx.fillStyle = "#ff6b9d";
+  ctx.beginPath(); ctx.moveTo(x + w/2, baseY - h - 96); ctx.lineTo(x + w/2 + 34, baseY - h - 88); ctx.lineTo(x + w/2, baseY - h - 80); ctx.fill();
+}
+
+function drawRing(o) {
+  const cx = o.x, cy = o.y;
+  ctx.lineWidth = 9;
+  ctx.strokeStyle = o.collected ? "#bbb" : "#ff6b9d";
+  ctx.beginPath(); ctx.arc(cx, cy, o.r, 0, 7); ctx.stroke();
+  ctx.strokeStyle = o.collected ? "#ddd" : "#ffd166";
+  ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.arc(cx, cy, o.r - 6, 0, 7); ctx.stroke();
+  // pole
+  ctx.strokeStyle = "#9aa"; ctx.lineWidth = 5;
+  ctx.beginPath(); ctx.moveTo(cx, cy + o.r); ctx.lineTo(cx, GROUND_Y); ctx.stroke();
+}
+function drawSpark(o) {
+  const bob = Math.sin(o.t*0.12) * 3;
+  if (blit("star", o.x, o.y + 15 + bob, 30)) return;
+  const cx = o.x, cy = o.y, s = 9 + Math.sin(o.t*0.2)*1.5;
+  ctx.fillStyle = "#ffe66d";
+  star(cx, cy, 5, s, s*0.45, o.t*0.04);
+  ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(cx, cy, 2.5, 0, 7); ctx.fill();
+}
+function drawMemory(o) {
+  const cx = o.x, cy = o.y + Math.sin(o.t*0.1)*4;
+  ctx.fillStyle = "rgba(150,255,255,0.25)";
+  ctx.beginPath(); ctx.arc(cx, cy, 22, 0, 7); ctx.fill();
+  ctx.font = "26px serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText(MEMORY[game.levelIndex], cx, cy);
+}
+function drawBounce(o) {
+  const x = o.x, y = o.y, w = o.w, h = o.h;
+  if (o.tint === "#5b8def" && blit("mailbox", x + w/2, y, 64)) return;   // mailbox
+  if (o.bounceHi && blit("hydrant", x + w/2, y, 60)) return;            // hydrant
+  if (o.tint === "#f4a261") { // parked car
+    ctx.fillStyle = o.tint; roundRect(x, y - h, w, h, 10); ctx.fill();
+    ctx.fillStyle = "#cfe8ff"; roundRect(x + 16, y - h + 6, w - 60, h - 26, 6); ctx.fill();
+    ctx.fillStyle = "#333";
+    ctx.beginPath(); ctx.arc(x + 26, y, 13, 0, 7); ctx.arc(x + w - 26, y, 13, 0, 7); ctx.fill();
+    smile(x + w - 18, y - h + 16, 6);
+  } else if (o.bounceHi) { // hydrant
+    ctx.fillStyle = o.tint; roundRect(x, y - h, w, h, 6); ctx.fill();
+    ctx.fillRect(x - 6, y - h*0.5, w + 12, 7);
+    ctx.fillStyle = "#fff"; ctx.beginPath(); ctx.arc(x+w/2, y-h+6, 6, 0, 7); ctx.fill();
+  } else { // mailbox
+    ctx.fillStyle = "#8a5a2b"; ctx.fillRect(x + w/2 - 3, y - 24, 6, 24);
+    ctx.fillStyle = o.tint; roundRect(x, y - h, w, h - 18, 8); ctx.fill();
+    ctx.fillStyle = "#fff"; eyes(x + 10, y - h + 14, x + w - 10, y - h + 14, 4);
+    ctx.fillStyle = "#e33"; ctx.fillRect(x + w - 6, y - h + 4, 5, 14);
+  }
+}
+function drawRail(o) {
+  ctx.strokeStyle = o.tint; ctx.lineWidth = o.h;
+  ctx.beginPath(); ctx.moveTo(o.x, o.y); ctx.lineTo(o.x + o.w, o.y); ctx.stroke();
+  // posts
+  ctx.strokeStyle = "rgba(0,0,0,0.35)"; ctx.lineWidth = 5;
+  for (let px = o.x; px <= o.x + o.w; px += 60) {
+    ctx.beginPath(); ctx.moveTo(px, o.y); ctx.lineTo(px, o.y + (o.y < RAIL_Y ? 80 : 36)); ctx.stroke();
+  }
+  // sparkle hint
+  if (o.tint === "#444") { // wire — add musical note feel
+    ctx.fillStyle = "rgba(255,255,255,0.5)";
+    for (let px = o.x + 20; px < o.x + o.w; px += 70) ctx.fillRect(px, o.y - 3, 4, 6);
+  }
+}
+function drawBush(o) {
+  if (blit("bush", o.x + o.w/2, o.y, 56)) return;
+  const x = o.x + o.w/2, y = o.y;
+  ctx.fillStyle = o.tint;
+  blob(x, y - 14, o.w*0.55, 14);
+  ctx.fillStyle = "#5fcf63";
+  ctx.beginPath(); ctx.arc(x-10, y-18, 11, 0, 7); ctx.arc(x+12, y-16, 13, 0, 7); ctx.arc(x, y-26, 12, 0, 7); ctx.fill();
+}
+function drawTree(o) {
+  const x = o.x + o.w/2;
+  ctx.fillStyle = "#8a5a2b"; ctx.fillRect(x - 8, o.y - 50, 16, 50);
+  ctx.fillStyle = o.tint;
+  ctx.beginPath(); ctx.arc(x, o.y - 78, 38, 0, 7); ctx.fill();
+  ctx.fillStyle = "#5fcf63";
+  ctx.beginPath(); ctx.arc(x - 14, o.y - 86, 18, 0, 7); ctx.arc(x + 16, o.y - 74, 16, 0, 7); ctx.fill();
+}
+function drawZombie(o) {
+  const sway = Math.sin(o.t*0.12)*3;
+  if (blit("zombie", o.x + o.w/2 + sway, o.y, 96)) return;
+  const x = o.x, y = o.y, w = o.w, h = o.h;
+  ctx.save(); ctx.translate(sway, 0);
+  ctx.fillStyle = "#caa472"; // cardboard body
+  roundRect(x, y - h, w, h, 4); ctx.fill();
+  ctx.strokeStyle = "rgba(0,0,0,0.2)"; ctx.lineWidth = 2; ctx.strokeRect(x, y - h, w, h);
+  // goofy monster face drawn on cardboard
+  ctx.fillStyle = o.tint;
+  ctx.beginPath(); ctx.arc(x + w/2, y - h + 22, 14, 0, 7); ctx.fill();
+  ctx.fillStyle = "#fff"; eyes(x + w/2 - 7, y - h + 20, x + w/2 + 7, y - h + 20, 4);
+  ctx.fillStyle = "#000"; eyes(x + w/2 - 7, y - h + 21, x + w/2 + 7, y - h + 21, 1.6);
+  ctx.strokeStyle = "#000"; ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let i=0;i<5;i++){ const zx=x+w/2-10+i*5; ctx.lineTo(zx, y-h+34 + (i%2?3:-3)); }
+  ctx.stroke();
+  ctx.restore();
+}
+function drawCone(o) {
+  const x = o.x + o.w/2, y = o.y;
+  ctx.fillStyle = o.tint;
+  ctx.beginPath(); ctx.moveTo(x, y - o.h); ctx.lineTo(x - o.w/2, y); ctx.lineTo(x + o.w/2, y); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = "#fff"; ctx.fillRect(x - o.w/2 + 4, y - o.h*0.55, o.w - 8, 6);
+}
+function drawLowSign(o) {
+  const top = o.y - o.h; // o.y is the bottom of the sign (matches the collision box)
+  ctx.strokeStyle = "#9aa"; ctx.lineWidth = 5;
+  ctx.beginPath(); ctx.moveTo(o.x + o.w/2, o.y); ctx.lineTo(o.x + o.w/2, GROUND_Y); ctx.stroke();
+  ctx.fillStyle = o.tint; roundRect(o.x, top, o.w, o.h, 6); ctx.fill();
+  ctx.fillStyle = "#333"; ctx.font = "bold 16px Trebuchet MS"; ctx.textAlign = "center"; ctx.textBaseline="middle";
+  ctx.fillText("SLIDE", o.x + o.w/2, top + o.h/2);
+}
+function drawPerson(o) {
+  if (blit("person", o.x + o.w/2, o.y, 88)) return;
+  const x = o.x + o.w/2, y = o.y, t = o.t * 0.18;
+  ctx.strokeStyle = "#333"; ctx.lineWidth = 5; ctx.lineCap = "round";
+  // legs
+  ctx.beginPath(); ctx.moveTo(x, y - 26); ctx.lineTo(x - 8 + Math.sin(t)*4, y); ctx.moveTo(x, y - 26); ctx.lineTo(x + 8 - Math.sin(t)*4, y); ctx.stroke();
+  // body
+  ctx.strokeStyle = o.tint; ctx.lineWidth = 12;
+  ctx.beginPath(); ctx.moveTo(x, y - 26); ctx.lineTo(x, y - 46); ctx.stroke();
+  // head
+  ctx.fillStyle = "#ffd9b3"; ctx.beginPath(); ctx.arc(x, y - 52, 8, 0, 7); ctx.fill();
+  if (o.bonked) { ctx.fillStyle = "#fff"; ctx.font="14px serif"; ctx.fillText("!", x+10, y-50); }
+}
+function drawAnimal(o) {
+  if (blit("dog", o.x + o.w/2, o.y, 52)) return;
+  const x = o.x, y = o.y, t = o.t*0.2;
+  ctx.fillStyle = o.tint;
+  blob(x + o.w/2, y - 10, o.w*0.5, 12);
+  // head
+  ctx.beginPath(); ctx.arc(x + o.w - 6, y - 18, 11, 0, 7); ctx.fill();
+  // ears + tail
+  ctx.beginPath(); ctx.moveTo(x+o.w-12,y-26); ctx.lineTo(x+o.w-16,y-36); ctx.lineTo(x+o.w-4,y-30); ctx.fill();
+  ctx.strokeStyle=o.tint; ctx.lineWidth=5; ctx.beginPath(); ctx.moveTo(x+4,y-12); ctx.lineTo(x-6, y-20+Math.sin(t)*4); ctx.stroke();
+  // legs
+  ctx.lineWidth=4; ctx.beginPath();
+  ctx.moveTo(x+8,y-8); ctx.lineTo(x+8,y); ctx.moveTo(x+o.w-12,y-8); ctx.lineTo(x+o.w-12,y); ctx.stroke();
+  ctx.fillStyle="#000"; ctx.beginPath(); ctx.arc(x+o.w-2,y-19,1.8,0,7); ctx.fill();
+}
+
+// ---- player ----
+const HERO_H = 112;   // on-screen draw height of the hero sprite canvas
+
+function drawPlayer(lvl) {
+  const px = player.x, baseY = player.y;
+  const blink = player.invuln > 0 && player.hurtT <= 0 && Math.floor(game.time/4) % 2 === 0;
+  ctx.save();
+  ctx.translate(px, baseY);
+
+  // sprint / dream-dash aura
+  if (player.sprinting) {
+    ctx.fillStyle = upgrades.dreamDash ? "rgba(150,255,255,0.3)" : "rgba(255,255,255,0.18)";
+    ctx.beginPath(); ctx.arc(0, -50, 50, 0, 7); ctx.fill();
+  }
+  // shield aura
+  if (player.hasShield) {
+    ctx.strokeStyle = "rgba(120,230,255,0.8)"; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(0, -50, 56 + Math.sin(game.time*0.2)*2, 0, 7); ctx.stroke();
+  }
+  // magnet aura
+  if (upgrades.magnet) {
+    ctx.strokeStyle = "rgba(255,210,77,0.35)"; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(0, -50, 68, 0, 7); ctx.stroke();
+  }
+
+  // ----- choose the sprite frame for the current state -----
+  let key;
+  if (game.state === "destination") key = "celebrate";
+  else if (player.hurtT > 0) key = (Math.floor(game.time/5) % 2 ? "hurt1" : "hurt2");
+  else if (player.sliding) key = "slide";
+  else if (!player.grounded && !player.onRail) {
+    if (player.vy < -2.5) key = "jumpUp";
+    else if (player.vy > 5) key = "jumpDown";
+    else key = "jumpFall";
+  } else if (player.landT > 0) key = "land";
+  else key = RUN_FRAMES[Math.floor(player.runCycle) % RUN_FRAMES.length];
+
+  const drewSprite = imgReady(key);
+  if (drewSprite) {
+    const im = IMG[key];
+    const w = im.naturalWidth / im.naturalHeight * HERO_H;
+    if (blink) ctx.globalAlpha = 0.5;
+    ctx.drawImage(im, -w/2, -HERO_H, w, HERO_H);
+    ctx.globalAlpha = 1;
+  } else {
+    if (blink) ctx.globalAlpha = 0.5;
+    drawHeroVector();        // fallback while images load
+    ctx.globalAlpha = 1;
+  }
+
+  // laser beam (origin ~ head height on the sprite)
+  if (player.lasering > 0) {
+    const charged = upgrades.chargeLaser && player.lasering > 9;
+    const range = charged ? 520 : 300;
+    const by = -HERO_H * 0.6;
+    const grad = ctx.createLinearGradient(14, 0, range, 0);
+    grad.addColorStop(0, charged ? "rgba(180,120,255,0.95)" : "rgba(120,255,180,0.95)");
+    grad.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = grad;
+    const bh = charged ? 34 : 14;
+    ctx.fillRect(14, by - bh/2, range, bh);
+    ctx.fillStyle = "#fff";
+    star(16, by, 4, 8, 3, game.time*0.3);
+  }
+
+  ctx.restore();
+}
+
+// vector hero (fallback, drawn relative to the player's feet at 0,0)
+function drawHeroVector() {
+  const sliding = player.sliding;
+  const bodyH = sliding ? 24 : 40;
+  const legSwing = Math.sin(player.runCycle * 2) * (player.grounded ? 10 : 4);
+  ctx.fillStyle = "#ff6b6b";
+  ctx.beginPath();
+  ctx.moveTo(-8, -bodyH - 10);
+  ctx.quadraticCurveTo(-28 - Math.sin(game.time*0.3)*6, -bodyH - 4, -34, -bodyH + 8);
+  ctx.quadraticCurveTo(-20, -bodyH - 2, -8, -bodyH - 2);
+  ctx.fill();
+  ctx.strokeStyle = "#3a3a5a"; ctx.lineWidth = 7; ctx.lineCap = "round";
+  if (!sliding) {
+    ctx.beginPath();
+    ctx.moveTo(-4, -10); ctx.lineTo(-6 - legSwing*0.6, 0);
+    ctx.moveTo(4, -10); ctx.lineTo(6 + legSwing*0.6, 0);
+    ctx.stroke();
+  } else { ctx.beginPath(); ctx.moveTo(-4, -6); ctx.lineTo(16, -2); ctx.stroke(); }
+  ctx.fillStyle = "#ffd166";
+  roundRect(-12, -bodyH, 24 + (sliding?6:0), bodyH - 4, 8); ctx.fill();
+  ctx.strokeStyle = "#ffd166"; ctx.lineWidth = 6;
+  ctx.beginPath(); ctx.moveTo(0, -bodyH + 12); ctx.lineTo(10 + legSwing*0.4, -bodyH + 22); ctx.stroke();
+  const hy = -bodyH - 8;
+  ctx.fillStyle = "#ffe0bd"; ctx.beginPath(); ctx.arc(2, hy, 14, 0, 7); ctx.fill();
+  ctx.fillStyle = "#6b4226"; ctx.beginPath(); ctx.arc(2, hy - 8, 12, Math.PI, 0); ctx.fill();
+  ctx.fillRect(-10, hy - 8, 24, 5);
+  ctx.fillStyle = "#fff";
+  ctx.beginPath(); ctx.arc(6, hy, 5, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(-3, hy, 4, 0, 7); ctx.fill();
+  ctx.fillStyle = "#222";
+  ctx.beginPath(); ctx.arc(7, hy + (player.vy<0?-1:1), 2.4, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(-2, hy + (player.vy<0?-1:1), 2, 0, 7); ctx.fill();
+}
+
+// ---- particles & text ----
+function drawParticles() {
+  for (const p of particles) {
+    const a = Math.max(0, p.life / p.max);
+    ctx.globalAlpha = a;
+    ctx.fillStyle = p.color;
+    if (p.kind === "star") { star(p.x, p.y, 5, p.size*1.6, p.size*0.7, p.life*0.1); }
+    else if (p.kind === "confetti") {
+      ctx.save(); ctx.translate(p.x, p.y); ctx.rotate(p.spin||0);
+      ctx.fillRect(-p.size/2, -p.size/2, p.size, p.size*1.6); ctx.restore();
+    } else if (p.kind === "smoke") {
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.size*(2-a), 0, 7); ctx.fill();
+    } else {
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, 7); ctx.fill();
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+function drawFloaters() {
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  for (const f of floaters) {
+    const a = Math.max(0, f.life / f.max);
+    ctx.globalAlpha = a;
+    ctx.font = "bold 18px Trebuchet MS";
+    ctx.fillStyle = "rgba(0,0,0,0.35)"; ctx.fillText(f.text, f.x+1, f.y+1);
+    ctx.fillStyle = f.color; ctx.fillText(f.text, f.x, f.y);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ---- car window frame foreground ----
+// the family car sits fixed at the bottom-front; an imagination beam runs from the
+// kid in the back passenger seat up to the avatar running outside.
+function drawCar(lvl) {
+  const bob = Math.sin(game.time * 0.22) * 1.5;          // subtle idle bob, otherwise steady
+  const cx0 = W * 0.18;                                   // left edge of the car
+  const carW = 500;
+  const bodyY = H - 34 + bob;                             // top of the lower body (sits at the very bottom)
+  const roofY = bodyY - 46;                               // top of the cabin (just below the ground line)
+  const night = lvl.night;
+  const bodyCol = night ? "#3a4f86" : "#4d96ff";
+  const roofCol = night ? "#2c3c66" : "#3f7fe0";
+
+  // ----- back-seat kid (beam origin) -----
+  const seatX = cx0 + 150, seatY = roofY + 24;
+
+  // ----- imagination beam: back seat -> avatar -----
+  const tx = player.x, ty = player.y - HERO_H * 0.42;
+  const pulse = 0.6 + 0.4 * Math.sin(game.time * 0.3);
+  ctx.save();
+  ctx.lineCap = "round";
+  ctx.strokeStyle = "rgba(120,230,255," + (0.16 * pulse).toFixed(3) + ")"; ctx.lineWidth = 16;
+  ctx.beginPath(); ctx.moveTo(seatX, seatY); ctx.lineTo(tx, ty); ctx.stroke();
+  ctx.strokeStyle = "rgba(180,120,255," + (0.30 * pulse).toFixed(3) + ")"; ctx.lineWidth = 8;
+  ctx.beginPath(); ctx.moveTo(seatX, seatY); ctx.lineTo(tx, ty); ctx.stroke();
+  ctx.strokeStyle = "rgba(160,245,255," + (0.55 * pulse).toFixed(3) + ")"; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(seatX, seatY); ctx.lineTo(tx, ty); ctx.stroke();
+  ctx.strokeStyle = "rgba(255,255,255," + (0.85 * pulse).toFixed(3) + ")"; ctx.lineWidth = 1.8;
+  ctx.beginPath(); ctx.moveTo(seatX, seatY); ctx.lineTo(tx, ty); ctx.stroke();
+  ctx.fillStyle = "#fff"; star(tx, ty, 4, 7, 3, game.time * 0.2);
+  ctx.restore();
+
+  // ----- car body -----
+  // wheels first (behind body, peeking out the bottom)
+  ctx.fillStyle = "#222";
+  ctx.beginPath(); ctx.arc(cx0 + 110, H + 8 + bob, 34, 0, 7); ctx.arc(cx0 + carW - 110, H + 8 + bob, 34, 0, 7); ctx.fill();
+  ctx.fillStyle = "#9aa0b0";
+  ctx.beginPath(); ctx.arc(cx0 + 110, H + 8 + bob, 14, 0, 7); ctx.arc(cx0 + carW - 110, H + 8 + bob, 14, 0, 7); ctx.fill();
+
+  // lower body
+  ctx.fillStyle = bodyCol;
+  roundRect(cx0, bodyY, carW, H - bodyY + 8, 26); ctx.fill();
+  // cabin / roof
+  ctx.fillStyle = roofCol;
+  ctx.beginPath();
+  ctx.moveTo(cx0 + 70, bodyY + 4);
+  ctx.lineTo(cx0 + 120, roofY);
+  ctx.lineTo(cx0 + carW - 150, roofY);
+  ctx.lineTo(cx0 + carW - 70, bodyY + 4);
+  ctx.closePath(); ctx.fill();
+
+  // windows (back + front), split by a pillar
+  const glass = night ? "rgba(120,150,210,0.55)" : "rgba(200,235,255,0.85)";
+  ctx.fillStyle = glass;
+  roundRect(cx0 + 96, roofY + 8, 120, bodyY - roofY - 6, 8); ctx.fill();        // back window
+  roundRect(cx0 + 232, roofY + 8, carW - 232 - 96, bodyY - roofY - 6, 8); ctx.fill(); // windshield
+
+  // kid in the back seat (beam origin)
+  ctx.save();
+  ctx.fillStyle = "#ffe0bd";                                    // head
+  ctx.beginPath(); ctx.arc(seatX, seatY, 15, 0, 7); ctx.fill();
+  ctx.fillStyle = "#6b4226";                                    // hair
+  ctx.beginPath(); ctx.arc(seatX, seatY - 4, 14, Math.PI, 0); ctx.fill();
+  ctx.fillRect(seatX - 14, seatY - 4, 28, 5);
+  ctx.strokeStyle = "#6b4226"; ctx.lineWidth = 2;               // antenna
+  ctx.beginPath(); ctx.moveTo(seatX, seatY - 17); ctx.lineTo(seatX, seatY - 27); ctx.stroke();
+  ctx.fillStyle = "#e0524d"; ctx.beginPath(); ctx.arc(seatX, seatY - 29, 3.5, 0, 7); ctx.fill();
+  ctx.fillStyle = "#222";                                       // eyes
+  ctx.beginPath(); ctx.arc(seatX + 4, seatY, 2, 0, 7); ctx.arc(seatX - 4, seatY, 2, 0, 7); ctx.fill();
+  ctx.restore();
+
+  // headlight + trim
+  ctx.fillStyle = night ? "rgba(255,240,150,0.95)" : "#ffe066";
+  ctx.beginPath(); ctx.arc(cx0 + carW - 8, bodyY + 26, 8, 0, 7); ctx.fill();
+  if (night) { // headlight cone
+    ctx.fillStyle = "rgba(255,240,150,0.10)";
+    ctx.beginPath(); ctx.moveTo(cx0 + carW, bodyY + 26); ctx.lineTo(W, bodyY - 10); ctx.lineTo(W, bodyY + 70); ctx.closePath(); ctx.fill();
+  }
+  ctx.fillStyle = "rgba(0,0,0,0.12)"; roundRect(cx0 + 12, bodyY + 30, carW - 24, 8, 4); ctx.fill();
+}
+
+// ---- HUD ----
+function drawHUD(lvl) {
+  // progress bar (top)
+  const barX = 60, barY = 22, barW = W - 120, barH = 14;
+  ctx.fillStyle = "rgba(255,255,255,0.85)"; ctx.font = "bold 16px Trebuchet MS"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
+  ctx.fillText("🚗 " + lvl.dest, barX, barY - 10);
+  ctx.textAlign = "right";
+  ctx.fillText(game.endBuilding ? "Arriving!" : Math.floor(game.progress) + "%", barX + barW, barY - 10);
+  ctx.fillStyle = "rgba(0,0,0,0.3)"; roundRect(barX, barY, barW, barH, 7); ctx.fill();
+  const grad = ctx.createLinearGradient(barX, 0, barX + barW, 0);
+  grad.addColorStop(0, "#6bcb77"); grad.addColorStop(1, "#4d96ff");
+  ctx.fillStyle = grad; roundRect(barX, barY, barW * game.progress/100, barH, 7); ctx.fill();
+  // car icon riding the bar
+  ctx.font = "16px serif"; ctx.textAlign = "center";
+  ctx.fillText("🏁", barX + barW + 0, barY + barH/2);
+
+  // score & combo (left)
+  ctx.textAlign = "left"; ctx.textBaseline = "top";
+  ctx.fillStyle = "#fff"; ctx.font = "bold 24px Trebuchet MS";
+  ctx.fillText("✦ " + game.score, 40, 44);
+  if (game.combo >= 2) {
+    const pulse = 1 + Math.min(0.5, game.combo*0.03) * (0.5 + 0.5*Math.sin(game.time*0.3));
+    ctx.save(); ctx.translate(44, 78); ctx.scale(pulse, pulse);
+    ctx.fillStyle = game.combo >= 8 ? "#ff6b9d" : "#ffd166";
+    ctx.font = "bold 20px Trebuchet MS";
+    ctx.fillText("Daydream x" + comboMult().toFixed(2).replace(/\.?0+$/,""), 0, 0);
+    ctx.restore();
+    // combo timer bar
+    ctx.fillStyle = "rgba(255,255,255,0.25)"; ctx.fillRect(44, 104, 120, 4);
+    ctx.fillStyle = "#ffd166"; ctx.fillRect(44, 104, 120 * game.comboTimer/130, 4);
+  }
+
+  // focus hearts (right)
+  ctx.textAlign = "right";
+  for (let i = 0; i < player.maxFocus; i++) {
+    const fx = W - 44 - i * 30;
+    ctx.font = "22px serif";
+    ctx.globalAlpha = i < player.focus ? 1 : 0.25;
+    ctx.fillText(i < player.focus ? "💡" : "💡", fx, 46);
+  }
+  ctx.globalAlpha = 1;
+
+  // ability chips (bottom-left of dashboard)
+  drawAbilityChips();
+}
+
+function drawAbilityChips() {
+  const chips = [];
+  if (upgrades.laser) chips.push(["X", "Beam"]);
+  if (upgrades.doubleJump) chips.push(["⤴", "x2 Jump"]);
+  if (upgrades.magnet) chips.push(["✦", "Magnet"]);
+  if (upgrades.chargeLaser) chips.push(["▶", "Charge"]);
+  if (upgrades.dreamDash) chips.push(["💫", "Dash Sprint"]);
+  let cx = 40;
+  ctx.textBaseline = "middle"; ctx.font = "bold 13px Trebuchet MS";
+  for (const [icon, label] of chips) {
+    const txt = icon + " " + label;
+    const w = ctx.measureText(txt).width + 18;
+    ctx.fillStyle = "rgba(255,255,255,0.12)"; roundRect(cx, H - 38, w, 22, 11); ctx.fill();
+    ctx.fillStyle = "#fff"; ctx.textAlign = "left";
+    ctx.fillText(txt, cx + 9, H - 26);
+    cx += w + 8;
+  }
+}
+
+// =============================================================================
+//  SCREENS
+// =============================================================================
+function panel(x, y, w, h) {
+  ctx.fillStyle = "rgba(20,12,40,0.82)";
+  roundRect(x, y, w, h, 18); ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,0.15)"; ctx.lineWidth = 2;
+  roundRectStroke(x, y, w, h, 18);
+}
+function centerText(t, y, size, color, weight = "bold", font = "Trebuchet MS") {
+  ctx.fillStyle = color; ctx.font = `${weight} ${size}px ${font}`;
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText(t, W/2, y);
+}
+
+// ---- pregame tutorial / how-to-play (doubles as the title / main menu) ----
+function drawTutorial() {
+  const g = ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,"#241a4a"); g.addColorStop(1,"#120b28");
+  ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+  // drifting sparks (carried over from the old title screen)
+  for (let i = 0; i < 24; i++) {
+    const x = (i*131 + game.time*0.4) % W;
+    const y = (i*97 + Math.sin(game.time*0.02+i)*40) % H;
+    ctx.fillStyle = "rgba(255,230,109," + (0.12 + 0.18*Math.sin(game.time*0.05+i)) + ")";
+    ctx.beginPath(); ctx.arc(x, y, 2, 0, 7); ctx.fill();
+  }
+
+  // title — this screen is now also the title / main menu
+  ctx.save();
+  ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.font = "bold 46px Trebuchet MS";
+  ctx.fillStyle = "#ffd166"; ctx.fillText("DREAM RIDE", W/2 + 2, 40 + 2);
+  ctx.fillStyle = "#ff6b9d"; ctx.fillText("DREAM RIDE", W/2, 40);
+  ctx.restore();
+  centerText("How to Play — string tricks together for a Daydream Chain ✦", 80, 16, "rgba(255,255,255,0.75)", "normal");
+  // high score, top-right (also carried over from the title)
+  ctx.fillStyle = "rgba(255,255,255,0.6)"; ctx.font = "16px Trebuchet MS";
+  ctx.textAlign = "right"; ctx.textBaseline = "top";
+  ctx.fillText("High Score: " + game.highScore, W - 20, 16);
+
+  // two columns: "from the start" and "unlocked as you ride"
+  const leftX = 70, rightX = W/2 + 24, topY = 142, lh = 46;
+
+  ctx.textAlign = "left"; ctx.textBaseline = "middle";
+  ctx.fillStyle = "#9ff"; ctx.font = "bold 20px Trebuchet MS";
+  ctx.fillText("● From the very first ride", leftX, topY - 18);
+
+  const base = [
+    ["↔", "MOVE", "← → / A D", "Slide the kid left & right freely"],
+    ["⬆", "JUMP", "Space / W / ↑ / Tap", "Hop over people, animals & gaps"],
+    ["⬇", "SLIDE / SLAM", "Down", "Duck under signs; slam down in mid-air"],
+    ["⚡", "SPEED UP", "Hold Shift", "Blaze the car forward — clear gaps for +150"],
+    ["⤒", "BOUNCE", "Land on top", "Mailboxes & hydrants launch you up (+75)"],
+    ["~", "GRIND", "Land on a rail", "Ride fences & wires for points per tick"],
+  ];
+  base.forEach((row, i) => drawTutorialRow(leftX, topY + 14 + i*lh, row));
+
+  ctx.fillStyle = "#ff9f43"; ctx.font = "bold 20px Trebuchet MS";
+  ctx.fillText("● Unlocked one per destination", rightX, topY - 18);
+
+  const grow = [
+    ["✂", "IMAGINATION BEAM", "Press X", "Zap bushes & cardboard monsters (+50)"],
+    ["⤴", "DOUBLE JUMP", "Jump twice", "Reach high rings & rooftop rails"],
+    ["✦", "SPARK MAGNET", "Passive", "Sparks drift into you automatically"],
+    ["▶", "CHARGED BEAM", "Hold X", "Clear a whole row in one blast"],
+    ["💫", "DREAM DASH", "Sprint", "Sprint faster & pass through hazards"],
+  ];
+  grow.forEach((row, i) => drawTutorialRow(rightX, topY + 14 + i*lh, row));
+
+  ctx.fillStyle = "rgba(255,255,255,0.85)"; ctx.font = "italic 16px Trebuchet MS"; ctx.textAlign = "left";
+  ctx.fillText("Each ride ends when you reach its building — and earns you the next New Idea.", rightX, topY + 14 + 5*lh + 6);
+
+  const a = 0.5 + 0.5*Math.sin(game.time*0.1); ctx.globalAlpha = a;
+  centerText("▶  Press SPACE / Tap to start driving", H - 36, 24, "#fff");
+  ctx.globalAlpha = 1;
+}
+function drawTutorialRow(x, y, [icon, name, keys, desc]) {
+  // icon badge
+  ctx.fillStyle = "rgba(255,255,255,0.12)"; roundRect(x, y - 16, 32, 32, 8); ctx.fill();
+  ctx.fillStyle = "#ffd166"; ctx.font = "18px serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText(icon, x + 16, y);
+  // name + keys
+  ctx.textAlign = "left";
+  ctx.fillStyle = "#fff"; ctx.font = "bold 16px Trebuchet MS";
+  const nameW = ctx.measureText(name).width;
+  ctx.fillText(name, x + 44, y - 8);
+  ctx.fillStyle = "#9ff"; ctx.font = "12px Trebuchet MS";
+  ctx.fillText(keys, x + 44 + nameW + 10, y - 8);
+  // description
+  ctx.fillStyle = "rgba(255,255,255,0.75)"; ctx.font = "13px Trebuchet MS";
+  ctx.fillText(desc, x + 44, y + 10);
+}
+function drawPause() {
+  ctx.fillStyle = "rgba(10,6,24,0.6)"; ctx.fillRect(0,0,W,H);
+  centerText("⏸  Paused", H/2 - 20, 44, "#fff");
+  centerText("Press P / Esc to resume", H/2 + 30, 20, "rgba(255,255,255,0.7)", "normal");
+}
+
+function drawDestination(lvl) {
+  ctx.fillStyle = "rgba(10,6,24,0.55)"; ctx.fillRect(0,0,W,H);
+  panel(W/2 - 300, H/2 - 150, 600, 300);
+  centerText("📍 Arrived: " + lvl.dest.replace(/^Drive (to |Through )?/,""), H/2 - 110, 30, "#ffd166");
+  centerText('"' + lvl.parentLine + '"', H/2 - 60, 22, "#fff", "italic");
+  centerText("💭 " + lvl.childLine, H/2 - 16, 20, "#9ff", "italic");
+  centerText("Ride bonus  +1000", H/2 + 30, 22, "#6bcb77");
+  centerText("Score: " + game.score + "    Best Chain: x" + game.bestCombo, H/2 + 66, 20, "#fff", "normal");
+  const a = 0.5 + 0.5*Math.sin(game.time*0.1);
+  ctx.globalAlpha = a;
+  centerText("Press SPACE / Tap for your New Idea →", H/2 + 116, 20, "#fff");
+  ctx.globalAlpha = 1;
+}
+
+function drawUpgrade(lvl) {
+  ctx.fillStyle = "rgba(10,6,24,0.6)"; ctx.fillRect(0,0,W,H);
+  panel(W/2 - 300, H/2 - 190, 600, 380);
+  centerText("✨ New Idea Unlocked!", H/2 - 152, 30, "#ff6b9d");
+  // ability card
+  ctx.fillStyle = "rgba(255,255,255,0.1)"; roundRect(W/2 - 240, H/2 - 116, 480, 120, 16); ctx.fill();
+  ctx.strokeStyle = "#ffd166"; ctx.lineWidth = 3; roundRectStroke(W/2 - 240, H/2 - 116, 480, 120, 16);
+  centerText(lvl.rewardName, H/2 - 84, 28, "#ffd166");
+  wrapText(lvl.rewardDesc, W/2, H/2 - 40, 430, 22, 17, "rgba(255,255,255,0.88)");
+  // how to score with the new mechanic
+  ctx.fillStyle = "rgba(107,203,119,0.16)"; roundRect(W/2 - 240, H/2 + 18, 480, 96, 14); ctx.fill();
+  centerText("★ How to score with it", H/2 + 40, 18, "#6bcb77");
+  wrapText(lvl.rewardPoints, W/2, H/2 + 78, 440, 22, 16, "rgba(255,255,255,0.9)");
+  const last = game.levelIndex >= LEVELS.length - 1;
+  const a = 0.5 + 0.5*Math.sin(game.time*0.1);
+  ctx.globalAlpha = a;
+  centerText(last ? "Press SPACE for the final stretch home →" : "Press SPACE / Tap to keep driving →", H/2 + 156, 20, "#fff");
+  ctx.globalAlpha = 1;
+}
+
+function drawGameOver() {
+  ctx.fillStyle = "rgba(10,6,24,0.7)"; ctx.fillRect(0,0,W,H);
+  centerText("💤 Lost in Thought", H/2 - 60, 48, "#ff6b9d");
+  centerText("Final Score: " + game.score, H/2, 30, "#fff");
+  centerText("High Score: " + game.highScore, H/2 + 40, 22, "#ffd166", "normal");
+  centerText("Press SPACE / Tap to dream again", H/2 + 100, 20, "rgba(255,255,255,0.8)", "normal");
+}
+
+function drawEnding() {
+  const g = ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,"#241a4a"); g.addColorStop(1,"#0e0a26");
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+  // moon + stars
+  ctx.fillStyle="#fdf6c9"; ctx.beginPath(); ctx.arc(W/2, H*0.28, 50, 0, 7); ctx.fill();
+  for (let i=0;i<60;i++){ ctx.fillStyle="rgba(255,255,255,"+(0.3+0.5*Math.sin(game.time*0.04+i))+")"; ctx.fillRect((i*97)%W,(i*53)%(H*0.6),2,2); }
+  centerText("🌙 Home at Last", H*0.5, 46, "#ffd166");
+  centerText("The whole ride, an adventure.", H*0.5 + 50, 22, "rgba(255,255,255,0.8)", "italic");
+  centerText("Final Wonder Points: " + game.score, H*0.62, 30, "#fff");
+  centerText("Longest Daydream Chain: x" + game.bestCombo, H*0.68, 20, "#9ff", "normal");
+  centerText("High Score: " + game.highScore, H*0.74, 20, "#ffd166", "normal");
+  const a = 0.5 + 0.5*Math.sin(game.time*0.1); ctx.globalAlpha = a;
+  centerText("Press SPACE / Tap to ride again", H*0.85, 20, "#fff");
+  ctx.globalAlpha = 1;
+}
+
+// =============================================================================
+//  DRAW HELPERS
+// =============================================================================
+function roundRect(x, y, w, h, r) {
+  r = Math.min(r, w/2, h/2);
+  ctx.beginPath();
+  ctx.moveTo(x+r, y);
+  ctx.arcTo(x+w, y, x+w, y+h, r);
+  ctx.arcTo(x+w, y+h, x, y+h, r);
+  ctx.arcTo(x, y+h, x, y, r);
+  ctx.arcTo(x, y, x+w, y, r);
+  ctx.closePath();
+}
+function roundRectStroke(x, y, w, h, r) { roundRect(x, y, w, h, r); ctx.stroke(); }
+function blob(cx, cy, rx, ry) {
+  ctx.beginPath(); ctx.ellipse(cx, cy, rx, ry, 0, 0, 7); ctx.fill();
+}
+function star(cx, cy, spikes, outer, inner, rot) {
+  let rotA = rot || 0; const step = Math.PI / spikes;
+  ctx.beginPath();
+  for (let i = 0; i < spikes * 2; i++) {
+    const r = i % 2 === 0 ? outer : inner;
+    ctx.lineTo(cx + Math.cos(rotA) * r, cy + Math.sin(rotA) * r);
+    rotA += step;
+  }
+  ctx.closePath(); ctx.fill();
+}
+function eyes(x1, y1, x2, y2, r) {
+  ctx.beginPath(); ctx.arc(x1, y1, r, 0, 7); ctx.arc(x2, y2, r, 0, 7); ctx.fill();
+}
+function smile(cx, cy, r) {
+  ctx.strokeStyle = "#222"; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0.1*Math.PI, 0.9*Math.PI); ctx.stroke();
+}
+function wrapText(text, cx, y, maxW, lh, size, color) {
+  ctx.font = `normal ${size}px Trebuchet MS`; ctx.fillStyle = color;
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  const words = text.split(" "); let line = ""; let yy = y; const lines = [];
+  for (const w of words) {
+    const test = line + w + " ";
+    if (ctx.measureText(test).width > maxW && line) { lines.push(line); line = w + " "; }
+    else line = test;
+  }
+  lines.push(line);
+  const startY = y - (lines.length-1)*lh/2;
+  lines.forEach((l, i) => ctx.fillText(l.trim(), cx, startY + i*lh));
+}
+
+// =============================================================================
+//  PERSISTENCE
+// =============================================================================
+function save(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch(e){} }
+function load(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch(e){ return d; } }
+
+// =============================================================================
+//  MAIN LOOP  (fixed timestep for consistent feel)
+// =============================================================================
+let acc = 0, last = performance.now();
+const STEP = 1000 / 60;
+function loop(now) {
+  acc += Math.min(now - last, 100); last = now;
+  let steps = 0;
+  while (acc >= STEP && steps < 5) { update(); acc -= STEP; steps++; }
+  draw();
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+// Resume audio context on first interaction (browser autoplay policy)
+window.addEventListener("pointerdown", () => { audioInit(); if (actx && actx.state === "suspended") actx.resume(); }, { once: false });
+window.addEventListener("keydown", () => { audioInit(); if (actx && actx.state === "suspended") actx.resume(); }, { once: false });
+</script>
+</body>
+</html>
