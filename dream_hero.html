@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-<title>Dream Ride: Dog Days</title>
+<title>Dream Ride — CarRunner</title>
 <style>
   :root { --bg: #1a1030; }
   * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -50,7 +50,7 @@
 <div id="wrap">
   <canvas id="game" width="960" height="540"></canvas>
 </div>
-<div id="hint">← → = Move &nbsp;•&nbsp; Space / ↑ = Jump (stomp!) &nbsp;•&nbsp; X = Beam &nbsp;•&nbsp; Down = Roll / Slam &nbsp;•&nbsp; Shift = Speed up &nbsp;•&nbsp; Roll under SLIDE IN THE MUD signs &nbsp;•&nbsp; P = Pause</div>
+<div id="hint">← → = Move &nbsp;•&nbsp; Space / ↑ = Jump &nbsp;•&nbsp; X = Imagination Beam &nbsp;•&nbsp; Down = Slide / Slam &nbsp;•&nbsp; Shift = Speed up &nbsp;•&nbsp; M = Mute &nbsp;•&nbsp; P = Pause</div>
 <script>
 "use strict";
 /* =========================================================================
@@ -73,43 +73,28 @@ const PLAYER_HSPEED = 5;          // left/right free-move speed
 const GRAVITY = 0.62;
 const JUMP_V = -13.2;
 const SLIDE_DUR = 32;             // frames a slide lasts
-const ROLL_DUR = 34;             // frames a roll lasts
-const MUD_DUR = 480;             // frames the dog stays muddy
 const SLOW_DUR = 48;              // frames of temporary slowdown after taking a hit
 
 // =============================================================================
 //  SPRITE ASSETS  (drawn from sprites/*.png; vector art is the fallback)
 // =============================================================================
 const IMG = {};
-// dog animation cycles (normal + muddy)
-const RUN_FRAMES  = ["drun1", "drun2", "drun3", "drun4"];
-const ROLL_FRAMES = ["droll1", "droll2", "droll3", "droll4"];
-const MRUN_FRAMES  = ["mrun1", "mrun2", "mrun3", "mrun4"];
-const MROLL_FRAMES = ["mroll1", "mroll2", "mroll3", "mroll4"];
+// curated 4-frame run cycle
+const RUN_FRAMES = ["runA", "runB", "runC", "runD"];
 function loadImg(key, file) {
   const im = new Image();
   im.src = file;
   IMG[key] = im;
 }
-// roadside props + car kept from the original game
 [
+  ["idle","idle.png"], ["jumpUp","jump_start.png"], ["jumpFall","jump_fall.png"],
+  ["jumpDown","jump_down.png"], ["land","jump_land.png"], ["slide","slide.png"],
+  ["hurt1","hurt1.png"], ["hurt2","hurt2.png"], ["celebrate","hero_celebrate.png"],
   ["bush","bush.png"], ["mailbox","mailbox.png"], ["hydrant","hydrant.png"],
-  ["zombie","zombie.png"], ["star","star.png"], ["car","dreamride_car.png"],
+  ["person","pedestrian.png"], ["dog","dog_obstacle.png"], ["zombie","zombie.png"],
+  ["star","star.png"], ["car","dreamride_car.png"],
+  ...RUN_FRAMES.map(n => [n, n + ".png"]),
 ].forEach(([k, f]) => loadImg(k, "sprites/" + f));
-// the dog hero — normal + muddy variants
-[
-  ["didle","normal_idle.png"], ["drun1","normal_run1.png"], ["drun2","normal_run2.png"], ["drun3","normal_run3.png"], ["drun4","normal_run4.png"],
-  ["djump","jump1_run2.png"], ["droll1","roll1_run1.png"], ["droll2","roll1_run2.png"], ["droll3","roll1_run3.png"], ["droll4","roll1_run4.png"],
-  ["dhurt","hurt_run2.png"], ["dvictory","victory_run1.png"],
-  ["midle","muddy_normal_idle.png"], ["mrun1","muddy_normal_run1.png"], ["mrun2","muddy_normal_run2.png"], ["mrun3","muddy_normal_run3.png"], ["mrun4","muddy_normal_run4.png"],
-  ["mjump","muddy_jump1_run2.png"], ["mroll1","muddy_roll1_run1.png"], ["mroll2","muddy_roll1_run2.png"], ["mroll3","muddy_roll1_run3.png"], ["mroll4","muddy_roll1_run4.png"],
-  ["mhurt","muddy_hurt_run2.png"], ["mvictory","muddy_victory_run1.png"],
-].forEach(([k, f]) => loadImg(k, "dog_assets/dog/" + f));
-// barnyard enemies: chickens replace people, cows replace dogs
-[
-  ["chick1","chicken_walk1.png"], ["chick2","chicken_walk2.png"], ["chickKO","chicken_defeated.png"], ["chickTaunt","chicken_taunt.png"],
-  ["cow1","cow_walk1.png"], ["cow2","cow_walk2.png"], ["cowKO","cow_defeated.png"], ["cowTaunt","cow_taunt.png"],
-].forEach(([k, f]) => loadImg(k, "dog_assets/enemies/" + f));
 
 // ----- intro: a press-to-start gate (intro_screen) then a movie of cut1..cut4 -----
 const MOVIE_SEQ = ["cut1", "cut2", "cut3", "cut4"];
@@ -191,10 +176,6 @@ const player = {
   laserCharge: 0,      // for charge laser
   sprinting: false,    // Shift held — fast run that clears gaps
   fastFalling: false,  // Down held in air — slam down
-  rolling: false,      // Down on ground — roll (defeats enemies, gets muddy)
-  rollCycle: 0,        // roll animation phase
-  muddy: false,        // rolled through mud
-  muddyT: 0,           // frames left muddy
   hurtT: 0,            // frames showing the hurt sprite
   landT: 0,            // frames showing the landing sprite
   runCycle: 0,         // animation phase
@@ -256,7 +237,7 @@ const LEVELS = [
     groundDark: "#7fbf57",
     far: "#bfe3a0",
     house: ["#e8c39e", "#d4a373", "#fefae0", "#ccd5ae"],
-    spawn: { ring: 4, fence: 4, wire: 4, tree: 3, bush: 3, animal: 3, person: 1, sign_low: 2, gap: 3, spark: 7, mailbox: 2, hydrant: 1 },
+    spawn: { ring: 4, fence: 4, wire: 4, tree: 3, bush: 3, animal: 3, person: 1, gap: 3, spark: 7, mailbox: 2, hydrant: 1 },
     reward: "magnet",
     rewardName: "Spark Magnet",
     rewardDesc: "Nearby sparks drift toward you automatically.",
@@ -297,7 +278,7 @@ const LEVELS = [
     far: "#3a2f66",
     house: ["#3d3a66", "#5a4f8a", "#2e2a52", "#473e7a"],
     night: true,
-    spawn: { ring: 4, cardboard: 5, bush: 2, cone: 3, person: 2, wire: 3, fence: 3, parkedcar: 2, sign_low: 2, gap: 4, spark: 7 },
+    spawn: { ring: 4, cardboard: 5, bush: 2, cone: 3, person: 2, wire: 3, fence: 3, parkedcar: 2, gap: 4, spark: 7 },
     reward: "dreamDash",
     rewardName: "Dream Dash",
     rewardDesc: "Now your Sprint (Shift) blazes faster AND passes safely through hazards in a trail of stars.",
@@ -421,14 +402,12 @@ function doJump() {
     for (let i = 0; i < 6; i++) particles.push(spark(player.x, player.y + player.h/2, "#dff", 1));
   }
 }
-// the dog rolls instead of sliding — low profile, defeats enemies, picks up mud
 function startSlide() {
   if (!player.grounded || player.sliding) return;
-  player.sliding = true; player.slideT = ROLL_DUR;
-  player.rolling = true; player.rollCycle = 0;
+  player.sliding = true; player.slideT = SLIDE_DUR;
   sfx("slide");
 }
-function endSlide() { player.sliding = false; player.slideT = 0; player.rolling = false; }
+function endSlide() { player.sliding = false; player.slideT = 0; }
 
 // Press Down in mid-air to slam back to the ground fast (so you can jump again sooner)
 function fastFall() {
@@ -449,17 +428,18 @@ function fireLaser(charged) {
   const range = (charged ? 520 : 300);
   const top = player.y - player.h + (player.sliding ? 22 : 4);
   const beamH = charged ? 70 : 30;
+  let hits = 0;
   for (const o of objects) {
-    if (o.dead) continue;
-    if (o.x + o.w < player.x || o.x > player.x + range) continue;
+    if (!o.destructible || o.dead) continue;
+    if (o.x + o.w < player.x) continue;
+    if (o.x > player.x + range) continue;
     const oy = o.y - o.h;
-    if (!(oy < top + beamH && o.y > top - 8)) continue;
-    if (o.destructible) {
-      o.dead = true;
-      addScore(50, o.x, oy, "+50"); bumpCombo();
-      burst(o.x, o.y - o.h/2, o.tint || "#9f6", 18); sfx("zap");
-    } else if (o.kind === "enemy" && !o.defeated) {
-      defeatEnemy(o);
+    if (oy < top + beamH && o.y > top - 8) {
+      o.dead = true; hits++;
+      addScore(50, o.x, oy, "+50");
+      bumpCombo();
+      burst(o.x, o.y - o.h/2, o.tint || "#9f6", 18);
+      sfx("zap");
     }
   }
   sfx(charged ? "beambig" : "beam");
@@ -516,14 +496,12 @@ function spawn() {
     case "cone":
       o.w = 30; o.h = 36; o.y = GROUND_Y; o.kind = "trip"; o.tint = "#ff9f43"; break;
     case "sign_low":
-      // "SLIDE IN THE MUD" — a brown mud slick on the ground: roll through to get muddy, or slip if you run it standing
-      o.w = 132; o.h = 22; o.y = GROUND_Y; o.kind = "low"; o.tint = "#6b4423"; o.slipped = false; break;
-    case "person": // chicken enemy (walks toward the dog; defeat by stomp/roll/laser)
-      o.w = 42; o.h = 58; o.y = GROUND_Y; o.kind = "enemy"; o.etype = "chick";
-      o.defeated = false; o.koT = 0; o.tauntT = 0; o.walkT = Math.random()*100; break;
-    case "animal": // cow enemy
-      o.w = 70; o.h = 54; o.y = GROUND_Y; o.kind = "enemy"; o.etype = "cow";
-      o.defeated = false; o.koT = 0; o.tauntT = 0; o.walkT = Math.random()*100; break;
+      // bottom of sign sits low enough that a standing player hits it but a slide clears it
+      o.w = 70; o.h = 30; o.y = GROUND_Y - 44; o.kind = "low"; o.tint = "#ffd166"; break;
+    case "person":
+      o.w = 26; o.h = 60; o.y = GROUND_Y; o.kind = "avoid"; o.tint = "#ffb3a0"; o.walk = Math.random()*6.28; break;
+    case "animal":
+      o.w = 44; o.h = 30; o.y = GROUND_Y; o.kind = "avoid"; o.tint = "#caa472"; o.dog = true; break;
     case "fence":
       o.w = 180 + Math.random()*120; o.h = 8; o.y = RAIL_Y + 40; o.kind = "rail"; o.tint = "#c98b53"; break;
     case "wire":
@@ -673,17 +651,6 @@ function takeHit(kind) {
   }
 }
 
-// chicken/cow knocked out by a stomp, roll, or laser
-function defeatEnemy(o) {
-  if (o.defeated) return;
-  o.defeated = true; o.koT = 44;
-  const cx = o.x + o.w/2, cy = o.y - o.h/2;
-  addScore(150, cx, o.y - o.h - 6, "+150"); bumpCombo();
-  burst(cx, cy, o.etype === "chick" ? "#fff" : "#d8c39a", 20);
-  for (let i = 0; i < 6; i++) particles.push(spark(cx, cy, o.etype === "chick" ? "#fff" : "#caa472", 1.3));
-  sfx("zap");
-}
-
 // =============================================================================
 //  UPDATE
 // =============================================================================
@@ -754,12 +721,10 @@ function update() {
 
   // ----- player physics -----
   player.runCycle += game.speed * 0.06;
-  if (player.rolling) player.rollCycle += 0.45;
   if (player.invuln > 0) player.invuln--;
   if (player.lasering > 0) player.lasering--;
   if (player.hurtT > 0) player.hurtT--;
   if (player.landT > 0) player.landT--;
-  if (player.muddyT > 0) { player.muddyT--; if (player.muddyT === 0) player.muddy = false; }
   if (game.slowT > 0) game.slowT--;
   if (game.comboTimer > 0) { game.comboTimer--; if (game.comboTimer === 0) breakCombo(); }
 
@@ -878,34 +843,16 @@ function update() {
       case "trip": // cone
         if (hit(pb, ob)) { takeHit("trip"); o.dead = true; }
         break;
-      case "low": // SLIDE IN THE MUD — roll through to get muddy; run it standing and you slip; jump to skip
-        if (hit(pb, ob)) {
-          if (player.rolling) {
-            if (!player.muddy) floaters.push({ x: player.x, y: player.y - 60, vy: -0.6, life: 40, max: 40, text: "Muddy!", color: "#a9743f" });
-            player.muddy = true; player.muddyT = MUD_DUR;
-            if (game.time % 3 === 0) particles.push({ x: player.x + (Math.random()-0.5)*30, y: GROUND_Y, vx: (Math.random()-0.5)*4, vy: -Math.random()*3, life: 22, max: 22, color: "#5e3a1c", size: 3+Math.random()*3, g: 0.22, kind: "dot" });
-          } else if (player.grounded && !o.slipped) {
-            o.slipped = true; game.slowT = SLOW_DUR; breakCombo();
-            floaters.push({ x: player.x, y: player.y - 60, vy: -0.5, life: 36, max: 36, text: "Slip!", color: "#ffd" });
-            sfx("slide");
-          }
-        }
+      case "low": // low sign — must slide under
+        if (hit(pb, ob)) { takeHit("low"); }
         break;
-      case "enemy": // chicken / cow — defeat by stomp, roll, or laser; otherwise it hurts you
-        o.walkT = (o.walkT || 0) + 1;
-        if (o.tauntT > 0) o.tauntT--;
-        if (o.defeated) { o.koT--; if (o.koT <= 0) o.dead = true; break; }
-        o.x -= 0.6;                       // walks toward the dog a touch faster than the scroll
-        if (hit(pb, ob)) {
-          const stomp = player.vy > 0 && (player.y - player.vy) <= o.y - o.h + 16;
-          if (stomp) {
-            defeatEnemy(o);
-            player.vy = JUMP_V * 0.8; player.grounded = false; player.jumpsUsed = 1;
-          } else if (player.rolling) {
-            defeatEnemy(o);
-          } else {
-            takeHit("enemy"); o.tauntT = 24;
-          }
+      case "avoid": // person / animal — never attack, avoid
+        if (hit(pb, ob)) { takeHit("avoid"); o.bonked = 12; }
+        else if (o.bonked) o.bonked--;
+        // perfect dodge bonus: jumped over closely
+        if (!o.dodged && o.x + o.w < player.x && player.grounded === false) {
+          o.dodged = true; addScore(100, o.x, o.y - o.h - 10, "DODGE +100"); bumpCombo();
+          floaters.push({ x: o.x, y: o.y - o.h - 30, vy: -0.7, life: 35, max: 35, text: "✦", color: "#9ff" });
         }
         break;
       case "gap": // hole in the road — jump it or Sprint across for a bonus
@@ -979,7 +926,6 @@ function beginLevel() {
   player.focus = player.maxFocus; player.invuln = 30;
   player.sliding = false; player.lasering = 0; player.laserCharge = 0;
   player.sprinting = false; player.fastFalling = false;
-  player.rolling = false; player.rollCycle = 0; player.muddy = false; player.muddyT = 0;
   player.hurtT = 0; player.landT = 0;
   player.hasShield = upgrades.shield;
 }
@@ -1198,7 +1144,7 @@ function drawObjects(lvl) {
       case "hazard": o.zombie ? drawZombie(o) : (o.big ? drawTree(o) : drawBush(o)); break;
       case "trip": drawCone(o); break;
       case "low": drawLowSign(o); break;
-      case "enemy": drawEnemy(o); break;
+      case "avoid": o.dog ? drawAnimal(o) : drawPerson(o); break;
       case "gap": drawGap(o, lvl); break;
       case "destination": drawDestinationBuilding(o, lvl); break;
     }
@@ -1354,104 +1300,143 @@ function drawCone(o) {
   ctx.beginPath(); ctx.moveTo(x, y - o.h); ctx.lineTo(x - o.w/2, y); ctx.lineTo(x + o.w/2, y); ctx.closePath(); ctx.fill();
   ctx.fillStyle = "#fff"; ctx.fillRect(x - o.w/2 + 4, y - o.h*0.55, o.w - 8, 6);
 }
-// brown "SLIDE IN THE MUD" slick — a flat mud puddle on the ground with a floating label
 function drawLowSign(o) {
-  const cx = o.x + o.w/2;
-  // puddle
-  ctx.fillStyle = "#6b4423"; ctx.beginPath(); ctx.ellipse(cx, o.y - 2, o.w/2, 13, 0, 0, 7); ctx.fill();
-  ctx.fillStyle = "#5e3a1c"; ctx.beginPath(); ctx.ellipse(cx, o.y - 4, o.w/2 - 14, 9, 0, 0, 7); ctx.fill();
-  ctx.fillStyle = "rgba(150,100,55,0.5)"; ctx.beginPath(); ctx.ellipse(cx - 20, o.y - 7, 9, 3, 0, 0, 7); ctx.fill();
-  ctx.fillStyle = "rgba(40,22,8,0.5)"; ctx.beginPath(); ctx.ellipse(cx + 24, o.y - 1, 8, 3, 0, 0, 7); ctx.fill();
-  // floating label
-  ctx.fillStyle = "rgba(60,34,14,0.88)"; roundRect(cx - 70, o.y - 50, 140, 22, 6); ctx.fill();
-  ctx.fillStyle = "#5e3a1c"; ctx.beginPath(); ctx.moveTo(cx - 5, o.y - 28); ctx.lineTo(cx + 5, o.y - 28); ctx.lineTo(cx, o.y - 22); ctx.fill();
-  ctx.fillStyle = "#ffe9c8"; ctx.font = "bold 13px Trebuchet MS"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
-  ctx.fillText("SLIDE IN THE MUD", cx, o.y - 39);
+  const top = o.y - o.h; // o.y is the bottom of the sign (matches the collision box)
+  ctx.strokeStyle = "#9aa"; ctx.lineWidth = 5;
+  ctx.beginPath(); ctx.moveTo(o.x + o.w/2, o.y); ctx.lineTo(o.x + o.w/2, GROUND_Y); ctx.stroke();
+  ctx.fillStyle = o.tint; roundRect(o.x, top, o.w, o.h, 6); ctx.fill();
+  ctx.fillStyle = "#333"; ctx.font = "bold 16px Trebuchet MS"; ctx.textAlign = "center"; ctx.textBaseline="middle";
+  ctx.fillText("SLIDE", o.x + o.w/2, top + o.h/2);
 }
-function drawEnemy(o) {
-  const cx = o.x + o.w/2, chick = o.etype === "chick";
-  let key;
-  if (o.defeated)       key = chick ? "chickKO" : "cowKO";
-  else if (o.tauntT > 0) key = chick ? "chickTaunt" : "cowTaunt";
-  else key = chick ? (Math.floor(o.walkT/8) % 2 ? "chick2" : "chick1")
-                   : (Math.floor(o.walkT/10) % 2 ? "cow2" : "cow1");
-  const h = o.defeated ? (chick ? 46 : 46) : (chick ? 70 : 62);
-  const bob = o.defeated ? 0 : (chick ? Math.abs(Math.sin(o.walkT*0.22))*6 : Math.sin(o.walkT*0.12)*2);
-  if (imgReady(key)) {
-    const im = IMG[key], w = im.naturalWidth / im.naturalHeight * h;
-    ctx.save();
-    ctx.translate(cx, o.y - bob);
-    ctx.scale(-1, 1);                 // flip to face left, toward the oncoming dog
-    ctx.drawImage(im, -w/2, -h, w, h);
-    ctx.restore();
-  } else {
-    ctx.fillStyle = chick ? "#fff" : "#caa472";
-    ctx.fillRect(o.x, o.y - o.h, o.w, o.h);
-  }
+function drawPerson(o) {
+  if (blit("person", o.x + o.w/2, o.y, 88)) return;
+  const x = o.x + o.w/2, y = o.y, t = o.t * 0.18;
+  ctx.strokeStyle = "#333"; ctx.lineWidth = 5; ctx.lineCap = "round";
+  // legs
+  ctx.beginPath(); ctx.moveTo(x, y - 26); ctx.lineTo(x - 8 + Math.sin(t)*4, y); ctx.moveTo(x, y - 26); ctx.lineTo(x + 8 - Math.sin(t)*4, y); ctx.stroke();
+  // body
+  ctx.strokeStyle = o.tint; ctx.lineWidth = 12;
+  ctx.beginPath(); ctx.moveTo(x, y - 26); ctx.lineTo(x, y - 46); ctx.stroke();
+  // head
+  ctx.fillStyle = "#ffd9b3"; ctx.beginPath(); ctx.arc(x, y - 52, 8, 0, 7); ctx.fill();
+  if (o.bonked) { ctx.fillStyle = "#fff"; ctx.font="14px serif"; ctx.fillText("!", x+10, y-50); }
+}
+function drawAnimal(o) {
+  if (blit("dog", o.x + o.w/2, o.y, 52)) return;
+  const x = o.x, y = o.y, t = o.t*0.2;
+  ctx.fillStyle = o.tint;
+  blob(x + o.w/2, y - 10, o.w*0.5, 12);
+  // head
+  ctx.beginPath(); ctx.arc(x + o.w - 6, y - 18, 11, 0, 7); ctx.fill();
+  // ears + tail
+  ctx.beginPath(); ctx.moveTo(x+o.w-12,y-26); ctx.lineTo(x+o.w-16,y-36); ctx.lineTo(x+o.w-4,y-30); ctx.fill();
+  ctx.strokeStyle=o.tint; ctx.lineWidth=5; ctx.beginPath(); ctx.moveTo(x+4,y-12); ctx.lineTo(x-6, y-20+Math.sin(t)*4); ctx.stroke();
+  // legs
+  ctx.lineWidth=4; ctx.beginPath();
+  ctx.moveTo(x+8,y-8); ctx.lineTo(x+8,y); ctx.moveTo(x+o.w-12,y-8); ctx.lineTo(x+o.w-12,y); ctx.stroke();
+  ctx.fillStyle="#000"; ctx.beginPath(); ctx.arc(x+o.w-2,y-19,1.8,0,7); ctx.fill();
 }
 
-// ---- player (the dog) ----
-const HERO_H = 92;    // on-screen draw height of the dog sprite
+// ---- player ----
+const HERO_H = 112;   // on-screen draw height of the hero sprite canvas
 
 function drawPlayer(lvl) {
   const px = player.x, baseY = player.y;
   const blink = player.invuln > 0 && player.hurtT <= 0 && Math.floor(game.time/4) % 2 === 0;
   ctx.save();
   ctx.translate(px, baseY);
-  const cy = -HERO_H * 0.5;   // rough body center for auras
 
+  // sprint / dream-dash aura
   if (player.sprinting) {
     ctx.fillStyle = upgrades.dreamDash ? "rgba(150,255,255,0.3)" : "rgba(255,255,255,0.18)";
-    ctx.beginPath(); ctx.arc(0, cy, 48, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.arc(0, -50, 50, 0, 7); ctx.fill();
   }
+  // shield aura
   if (player.hasShield) {
     ctx.strokeStyle = "rgba(120,230,255,0.8)"; ctx.lineWidth = 3;
-    ctx.beginPath(); ctx.arc(0, cy, 52 + Math.sin(game.time*0.2)*2, 0, 7); ctx.stroke();
+    ctx.beginPath(); ctx.arc(0, -50, 56 + Math.sin(game.time*0.2)*2, 0, 7); ctx.stroke();
   }
+  // magnet aura
   if (upgrades.magnet) {
     ctx.strokeStyle = "rgba(255,210,77,0.35)"; ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.arc(0, cy, 62, 0, 7); ctx.stroke();
+    ctx.beginPath(); ctx.arc(0, -50, 68, 0, 7); ctx.stroke();
   }
 
-  // ----- choose the dog frame for the current state -----
-  const m = player.muddy;
+  // ----- choose the sprite frame for the current state -----
   let key;
-  if (game.state === "destination") key = m ? "mvictory" : "dvictory";
-  else if (player.hurtT > 0) key = m ? "mhurt" : "dhurt";
-  else if (player.rolling) key = (m ? MROLL_FRAMES : ROLL_FRAMES)[Math.floor(player.rollCycle) % 4];
-  else if (!player.grounded && !player.onRail) key = m ? "mjump" : "djump";
-  else key = (m ? MRUN_FRAMES : RUN_FRAMES)[Math.floor(player.runCycle) % 4];
+  if (game.state === "destination") key = "celebrate";
+  else if (player.hurtT > 0) key = (Math.floor(game.time/5) % 2 ? "hurt1" : "hurt2");
+  else if (player.sliding) key = "slide";
+  else if (!player.grounded && !player.onRail) {
+    if (player.vy < -2.5) key = "jumpUp";
+    else if (player.vy > 5) key = "jumpDown";
+    else key = "jumpFall";
+  } else if (player.landT > 0) key = "land";
+  else key = RUN_FRAMES[Math.floor(player.runCycle) % RUN_FRAMES.length];
 
-  if (imgReady(key)) {
+  const drewSprite = imgReady(key);
+  if (drewSprite) {
     const im = IMG[key];
     const w = im.naturalWidth / im.naturalHeight * HERO_H;
     if (blink) ctx.globalAlpha = 0.5;
     ctx.drawImage(im, -w/2, -HERO_H, w, HERO_H);
     ctx.globalAlpha = 1;
-  } else {                                   // simple fallback until the dog loads
+  } else {
     if (blink) ctx.globalAlpha = 0.5;
-    ctx.fillStyle = m ? "#7a5a36" : "#d99a4e";
-    ctx.beginPath(); ctx.ellipse(0, -22, 30, 18, 0, 0, 7); ctx.fill();
-    ctx.beginPath(); ctx.arc(26, -34, 12, 0, 7); ctx.fill();
+    drawHeroVector();        // fallback while images load
     ctx.globalAlpha = 1;
   }
 
-  // imagination beam (laser) from the dog's snout
+  // laser beam (origin ~ head height on the sprite)
   if (player.lasering > 0) {
     const charged = upgrades.chargeLaser && player.lasering > 9;
     const range = charged ? 520 : 300;
-    const by = -HERO_H * 0.5;
-    const grad = ctx.createLinearGradient(20, 0, range, 0);
+    const by = -HERO_H * 0.6;
+    const grad = ctx.createLinearGradient(14, 0, range, 0);
     grad.addColorStop(0, charged ? "rgba(180,120,255,0.95)" : "rgba(120,255,180,0.95)");
     grad.addColorStop(1, "rgba(255,255,255,0)");
     ctx.fillStyle = grad;
     const bh = charged ? 34 : 14;
-    ctx.fillRect(20, by - bh/2, range, bh);
+    ctx.fillRect(14, by - bh/2, range, bh);
     ctx.fillStyle = "#fff";
-    star(22, by, 4, 8, 3, game.time*0.3);
+    star(16, by, 4, 8, 3, game.time*0.3);
   }
 
   ctx.restore();
+}
+
+// vector hero (fallback, drawn relative to the player's feet at 0,0)
+function drawHeroVector() {
+  const sliding = player.sliding;
+  const bodyH = sliding ? 24 : 40;
+  const legSwing = Math.sin(player.runCycle * 2) * (player.grounded ? 10 : 4);
+  ctx.fillStyle = "#ff6b6b";
+  ctx.beginPath();
+  ctx.moveTo(-8, -bodyH - 10);
+  ctx.quadraticCurveTo(-28 - Math.sin(game.time*0.3)*6, -bodyH - 4, -34, -bodyH + 8);
+  ctx.quadraticCurveTo(-20, -bodyH - 2, -8, -bodyH - 2);
+  ctx.fill();
+  ctx.strokeStyle = "#3a3a5a"; ctx.lineWidth = 7; ctx.lineCap = "round";
+  if (!sliding) {
+    ctx.beginPath();
+    ctx.moveTo(-4, -10); ctx.lineTo(-6 - legSwing*0.6, 0);
+    ctx.moveTo(4, -10); ctx.lineTo(6 + legSwing*0.6, 0);
+    ctx.stroke();
+  } else { ctx.beginPath(); ctx.moveTo(-4, -6); ctx.lineTo(16, -2); ctx.stroke(); }
+  ctx.fillStyle = "#ffd166";
+  roundRect(-12, -bodyH, 24 + (sliding?6:0), bodyH - 4, 8); ctx.fill();
+  ctx.strokeStyle = "#ffd166"; ctx.lineWidth = 6;
+  ctx.beginPath(); ctx.moveTo(0, -bodyH + 12); ctx.lineTo(10 + legSwing*0.4, -bodyH + 22); ctx.stroke();
+  const hy = -bodyH - 8;
+  ctx.fillStyle = "#ffe0bd"; ctx.beginPath(); ctx.arc(2, hy, 14, 0, 7); ctx.fill();
+  ctx.fillStyle = "#6b4226"; ctx.beginPath(); ctx.arc(2, hy - 8, 12, Math.PI, 0); ctx.fill();
+  ctx.fillRect(-10, hy - 8, 24, 5);
+  ctx.fillStyle = "#fff";
+  ctx.beginPath(); ctx.arc(6, hy, 5, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(-3, hy, 4, 0, 7); ctx.fill();
+  ctx.fillStyle = "#222";
+  ctx.beginPath(); ctx.arc(7, hy + (player.vy<0?-1:1), 2.4, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(-2, hy + (player.vy<0?-1:1), 2, 0, 7); ctx.fill();
 }
 
 // ---- particles & text ----
@@ -1623,10 +1608,10 @@ function drawTutorial() {
   // title — this screen is now also the title / main menu
   ctx.save();
   ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.font = "bold 46px Trebuchet MS";
-  ctx.fillStyle = "#ffd166"; ctx.fillText("DREAM RIDE: DOG DAYS", W/2 + 2, 40 + 2);
-  ctx.fillStyle = "#ff6b9d"; ctx.fillText("DREAM RIDE: DOG DAYS", W/2, 40);
+  ctx.fillStyle = "#ffd166"; ctx.fillText("DREAM RIDE", W/2 + 2, 40 + 2);
+  ctx.fillStyle = "#ff6b9d"; ctx.fillText("DREAM RIDE", W/2, 40);
   ctx.restore();
-  centerText("How to Play — be the dog, romp the road, chain tricks for a Daydream Chain ✦", 80, 16, "rgba(255,255,255,0.75)", "normal");
+  centerText("How to Play — string tricks together for a Daydream Chain ✦", 80, 16, "rgba(255,255,255,0.75)", "normal");
   // high score, top-right (also carried over from the title)
   ctx.fillStyle = "rgba(255,255,255,0.6)"; ctx.font = "16px Trebuchet MS";
   ctx.textAlign = "right"; ctx.textBaseline = "top";
@@ -1640,11 +1625,11 @@ function drawTutorial() {
   ctx.fillText("● From the very first ride", leftX, topY - 18);
 
   const base = [
-    ["↔", "MOVE", "← → / A D", "Run the dog left & right freely"],
-    ["⬆", "STOMP", "Space / ↑ / Tap", "Jump gaps — land on a chicken/cow to KO it (+150)"],
-    ["⬇", "ROLL", "Down", "Roll into chickens & cows to KO them; ducks low"],
-    ["💩", "MUD", "Roll through", "Roll through a SLIDE IN THE MUD slick to get muddy"],
+    ["↔", "MOVE", "← → / A D", "Slide the kid left & right freely"],
+    ["⬆", "JUMP", "Space / W / ↑ / Tap", "Hop over people, animals & gaps"],
+    ["⬇", "SLIDE / SLAM", "Down", "Duck under signs; slam down in mid-air"],
     ["⚡", "SPEED UP", "Hold Shift", "Blaze the car forward — clear gaps for +150"],
+    ["⤒", "BOUNCE", "Land on top", "Mailboxes & hydrants launch you up (+75)"],
     ["~", "GRIND", "Land on a rail", "Ride fences & wires for points per tick"],
   ];
   base.forEach((row, i) => drawTutorialRow(leftX, topY + 14 + i*lh, row));
@@ -1653,7 +1638,7 @@ function drawTutorial() {
   ctx.fillText("● Unlocked one per destination", rightX, topY - 18);
 
   const grow = [
-    ["✂", "IMAGINATION BEAM", "Press X", "Zap bushes, monsters & barnyard critters (+50)"],
+    ["✂", "IMAGINATION BEAM", "Press X", "Zap bushes & cardboard monsters (+50)"],
     ["⤴", "DOUBLE JUMP", "Jump twice", "Reach high rings & rooftop rails"],
     ["✦", "SPARK MAGNET", "Passive", "Sparks drift into you automatically"],
     ["▶", "CHARGED BEAM", "Hold X", "Clear a whole row in one blast"],

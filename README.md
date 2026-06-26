@@ -4,11 +4,22 @@ A surreal, single-file browser auto-runner: a bored kid in the back seat turns e
 ride into a wild imaginary platforming adventure across signs, fences, mailboxes, trees,
 and goofy cardboard monsters.
 
-The game is **`index.html`** — canvas + vanilla JavaScript, no build step and no
-dependencies. The hero and several roadside objects use transparent PNG sprites in
-**`sprites/`**; everything else (backgrounds, rails, rings, UI, particles) is drawn with
-canvas shapes, and all sound is a tiny WebAudio synth. If a sprite hasn't loaded yet the
-game falls back to canvas-vector art, so it always renders.
+There are two playable builds:
+
+- **`index.html`** — *Dog Days*, the main build: you play the dog. Same world/levels as
+  the original, but with the Yampa Valley dog (run / jump / roll / muddy / victory), the
+  people replaced by **chickens** and the dogs by **cows** as **defeatable enemies** (stomp
+  by jumping, roll into them, or zap them with the beam), and the "SLIDE" signs turned into
+  **SLIDE IN THE MUD** slicks (roll through one to get muddy; run it standing and you slip;
+  jump to skip). Dog/enemy art lives in **`dog_assets/`**.
+- **`dream_hero.html`** — the original kid runner: you play the kid's imagined avatar.
+
+Each build is a single HTML file — canvas + vanilla JavaScript, no build step and no
+dependencies. Sprites are transparent PNGs in **`sprites/`** (and `dog_assets/`);
+everything else (backgrounds, rails, rings, UI, particles) is drawn with canvas shapes.
+Sound is a tiny WebAudio synth for effects plus **`theme.mp3`**, which starts the moment the
+opening cutscene begins and loops from there on. If a sprite hasn't loaded yet the build
+falls back to canvas-vector art, so it always renders.
 
 ## Play locally
 
